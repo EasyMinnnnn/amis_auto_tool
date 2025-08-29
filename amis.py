@@ -18,6 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from docx import Document
 from docx.shared import Inches
 
+
 # ===================== Selenium: login + download =====================
 
 def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
@@ -44,6 +45,41 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     return driver
 
 
+def _click_if_appears(driver: webdriver.Chrome, wait: WebDriverWait, selectors) -> bool:
+    """Thử click một trong các selector, im lặng nếu không có."""
+    for by, sel in selectors:
+        try:
+            el = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
+            el.click()
+            time.sleep(0.2)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def _handle_post_login_popups(driver: webdriver.Chrome, wait: WebDriverWait):
+    """Đóng các pop-up sau login (2FA/onboarding) để không che UI."""
+    _click_if_appears(driver, wait, [
+        (By.XPATH, "//button[contains(.,'Bỏ qua') or contains(.,'Tiếp tục làm việc')]"),
+        (By.XPATH, "//button[contains(.,'Đóng') or contains(.,'Bỏ qua, tiếp tục làm việc')]"),
+        (By.CSS_SELECTOR, "[aria-label='Close'],[data-dismiss],.close")
+    ])
+
+
+def _switch_to_last_tab(driver: webdriver.Chrome):
+    """Nếu trang mở tab mới, chuyển sang tab cuối."""
+    try:
+        if len(driver.window_handles) > 1:
+            driver.switch_to.window(driver.window_handles[-1])
+    except Exception:
+        pass
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+
 def run_automation(
     username: str,
     password: str,
@@ -64,14 +100,12 @@ def run_automation(
 
         # Nhập Username
         username_input = wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.CSS_SELECTOR,
-                    "#box-login-right > div > div > div.login-form-basic-container > "
-                    "div > div.login-form-inputs.login-class > "
-                    "div.wrap-input.username-wrap.validate-input > input",
-                )
-            )
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "#box-login-right > div > div > div.login-form-basic-container > "
+                "div > div.login-form-inputs.login-class > "
+                "div.wrap-input.username-wrap.validate-input > input",
+            ))
         )
         username_input.send_keys(username)
 
@@ -92,31 +126,23 @@ def run_automation(
         )
         login_btn.click()
 
-        # Chờ tới khi login thành công (URL chứa amisapp.misa.vn)
+        # Chờ đã đăng nhập (domain amisapp.misa.vn), rồi đóng popups nếu có
         wait.until(EC.url_contains("amisapp.misa.vn"))
-        time.sleep(1.5)
+        time.sleep(1.0)
+        _handle_post_login_popups(driver, wait)
 
-        # 2) Vào trang quy trình, tìm record_id (ô tìm kiếm là <input> trong trang)
+        # 2) Vào trang quy trình (không chờ URL; chờ trực tiếp ô tìm kiếm)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        wait.until(EC.url_contains("/process/execute"))
+        time.sleep(0.6)
+        _switch_to_last_tab(driver)   # nếu app mở bằng tab mới
 
-        # Một số popover/onboarding có thể che thanh công cụ → đóng nếu có
-        for by, sel in [
-            (By.XPATH, "//button[contains(.,'Để sau') or contains(.,'Bỏ qua') or contains(.,'Đóng')]"),
-            (By.CSS_SELECTOR, "[data-dismiss],[aria-label='Close'],.close"),
-        ]:
-            try:
-                el = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
-                el.click()
-                time.sleep(0.3)
-            except Exception:
-                pass
-
-        # Chờ đúng ô tìm kiếm trong trang (input với placeholder 'Tìm kiếm')
+        # Chờ ô tìm kiếm ngay trong trang (INPUT có placeholder 'Tìm kiếm…')
         search = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "input[placeholder*='Tìm kiếm']")
-            )
+            EC.presence_of_element_located((
+                By.XPATH,
+                "(//*[self::input or self::textarea]"
+                "[contains(@placeholder,'Tìm kiếm')])[1]"
+            ))
         )
 
         # Nhập & tìm
