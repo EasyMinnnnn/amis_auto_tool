@@ -26,10 +26,7 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    # CHÚ Ý: chỉ bật dòng dưới nếu chắc chắn Chromium ở đúng path trên máy/chỗ deploy.
-    # Nếu chạy trên Streamlit Cloud, thường KHÔNG cần đặt binary_location.
-    # opts.binary_location = "/usr/bin/chromium"
-
+    # opts.binary_location = "/usr/bin/chromium"  # bật nếu cần
     prefs = {
         "download.default_directory": download_dir,
         "download.prompt_for_download": False,
@@ -37,10 +34,63 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         "safebrowsing.enabled": True,
     }
     opts.add_experimental_option("prefs", prefs)
-
     drv = webdriver.Chrome(options=opts)
     drv.set_window_size(1440, 900)
     return drv
+
+
+# ===================== Small helpers (iframe + debug) =====================
+
+def _switch_to_possible_iframes(driver) -> bool:
+    """Thử chuyển vào các iframe thường gặp; True nếu đã chuyển thành công."""
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    candidates = ["app-iframe", "main-iframe", "content-iframe", "amis-iframe"]
+    for c in candidates:
+        for by in (By.ID, By.NAME):
+            try:
+                iframe = WebDriverWait(driver, 2).until(
+                    EC.presence_of_element_located((by, c))
+                )
+                driver.switch_to.frame(iframe)
+                return True
+            except Exception:
+                pass
+
+    try:
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for f in iframes:
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(f)
+                if driver.find_elements(By.CSS_SELECTOR, "input,textarea"):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    return False
+
+
+def _dump_debug(driver, out_dir: str, tag: str) -> None:
+    """Lưu screenshot + HTML để debug khi fail."""
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        png = os.path.join(out_dir, f"debug_{tag}.png")
+        html = os.path.join(out_dir, f"debug_{tag}.html")
+        driver.save_screenshot(png)
+        with open(html, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+    except Exception:
+        pass
 
 
 # ===================== MAIN =====================
@@ -67,7 +117,7 @@ def run_automation(
         user_el = wait.until(EC.presence_of_element_located((
             By.CSS_SELECTOR,
             "#box-login-right .login-form-inputs .username-wrap input",
-        )))
+        ))))
         user_el.send_keys(username)
 
         pw_el = driver.find_element(
@@ -111,51 +161,63 @@ def run_automation(
         except Exception:
             pass
 
-        # 3) Tìm ô tìm kiếm bằng POLL JS (tránh phụ thuộc clickable/overlay)
-        def _poll_search_el(timeout_s=25):
+        # 3) Tìm ô tìm kiếm bằng POLL JS (robust, hỗ trợ iframe + nhiều selector)
+        def _poll_search_el(timeout_s=35):
             end = time.time() + timeout_s
-            # luôn về khung gốc
-            try:
-                driver.switch_to.default_content()
-            except Exception:
-                pass
 
-            js = """
-return (function(){
-  const sel = "textarea.global-search-input,textarea[placeholder*='Tìm kiếm'],input.global-search-input,input[placeholder*='Tìm kiếm']";
-  const el = document.querySelector(sel);
+            selectors = [
+                "textarea.global-search-input",
+                "input.global-search-input",
+                "textarea[placeholder*='Tìm kiếm']",
+                "input[placeholder*='Tìm kiếm']",
+                "input[type='search']",
+                "[role='search'] input",
+                "input[placeholder], textarea[placeholder]",
+            ]
+
+            def _visible_query(sel: str) -> str:
+                return f"""
+return (function(){{
+  const el = document.querySelector("{sel}");
   if (!el) return null;
   const style = window.getComputedStyle(el);
   const visible = style && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
   return visible ? el : null;
-})();
+}})();
 """
+
             while time.time() < end:
+                _switch_to_possible_iframes(driver)
+
+                # thử phím tắt "/" để bật ô search nếu hỗ trợ
                 try:
-                    el = driver.execute_script(js)
-                    if el:
-                        return el
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    body.send_keys("/")
                 except Exception:
                     pass
-                time.sleep(0.4)
+
+                for sel in selectors:
+                    try:
+                        el = driver.execute_script(_visible_query(sel))
+                        if el:
+                            return el
+                    except Exception:
+                        pass
+
+                time.sleep(0.5)
+
             return None
 
-        search_el = _poll_search_el(timeout_s=18)
-
-        # Nếu chưa thấy, thử phím tắt '/' rồi poll lại
-        if not search_el:
-            try:
-                body = driver.find_element(By.TAG_NAME, "body")
-                body.send_keys("/")
-                time.sleep(0.6)
-            except Exception:
-                pass
-            search_el = _poll_search_el(timeout_s=12)
+        search_el = _poll_search_el(timeout_s=35)
 
         if not search_el:
-            raise TimeoutException("Không tìm thấy ô tìm kiếm thông minh (global-search-input).")
+            _dump_debug(driver, download_dir, "no_global_search")
+            raise TimeoutException(
+                "Không tìm thấy ô tìm kiếm thông minh (global-search-input). "
+                "Đã lưu debug screenshot/HTML trong thư mục download."
+            )
 
-        # 4) Bơm record_id & nhấn Enter bằng JS (mô phỏng thao tác tay)
+        # 4) Bơm record_id & nhấn Enter bằng JS
         driver.execute_script("""
 const el = arguments[0];
 const val = arguments[1];
@@ -168,7 +230,6 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
 """, search_el, record_id)
 
         # 5) Chờ panel kết quả và click đúng ID
-        # Ưu tiên link text == ID, fallback chứa ID
         try:
             result_link = WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.XPATH, f"//a[normalize-space()='{record_id}']"))
@@ -177,6 +238,7 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
             result_link = WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.XPATH, f"//a[contains(.,'{record_id}')]"))
             )
+
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", result_link)
         driver.execute_script("arguments[0].click();", result_link)
         time.sleep(1.0)
