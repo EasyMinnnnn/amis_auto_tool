@@ -1,103 +1,170 @@
 """Helper module for AMIS automation and document manipulation.
 
-Trong bản này:
-- run_automation() CHƯA đăng nhập AMIS thật. Thay vào đó tạo 1 file .docx mẫu
-  hợp lệ để tránh lỗi khi demo trên Streamlit Cloud.
-- Khi bạn sẵn sàng, thay phần “TODO: Selenium” bằng code tự động truy cập AMIS,
-  tìm ID, tải file Word + ảnh về thư mục download_dir, rồi return đường dẫn thực.
+- run_automation(): đăng nhập AMIS, tìm ID, tải file Word và ảnh về download_dir.
+- fill_document(): chèn ảnh đúng ô trong bảng “Phụ lục Ảnh TSSS” và chữ ký.
 """
 
-from __future__ import annotations
-
-import os
+import os, time
 from typing import List, Tuple
+import requests
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
 
 from docx import Document
 from docx.shared import Inches
 
 
-def run_automation(
-    username: str,
-    password: str,
-    record_id: str,
-    download_dir: str,
-    headless: bool = True,
-) -> Tuple[str, List[str]]:
-    """
-    TẠM THỜI: tạo file DOCX mẫu hợp lệ để tránh lỗi PackageNotFoundError.
-    TODO (bạn sẽ thay sau): dùng Selenium để đăng nhập AMIS, tìm theo record_id,
-    tải file Word (Phiếu TTTT - Nhà đất) và các ảnh về download_dir.
+# ===================== Selenium phần login + download =====================
 
-    Returns:
-        template_path: đường dẫn file Word (hiện là file mẫu được tạo)
-        images: danh sách đường dẫn ảnh đã tải (tạm để rỗng)
-    """
+def _make_driver(download_dir: str) -> webdriver.Chrome:
+    """Tạo Chrome headless với thư mục tải cụ thể (dùng trên Streamlit Cloud)."""
     os.makedirs(download_dir, exist_ok=True)
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.binary_location = "/usr/bin/chromium"
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "profile.default_content_settings.popups": 0,
+        "safebrowsing.enabled": True,
+    }
+    opts.add_experimental_option("prefs", prefs)
+    driver = webdriver.Chrome(options=opts)
+    driver.set_window_size(1440, 900)
+    return driver
 
-    # Tạo file DOCX mẫu hợp lệ
-    template_path = os.path.join(download_dir, "template.docx")
-    doc = Document()
-    doc.add_heading("PHIẾU THU THẬP THÔNG TIN VỀ BẤT ĐỘNG SẢN (MẪU)", level=1)
-    doc.add_paragraph(f"Mã Tài sản (demo): {record_id}")
-    doc.add_paragraph("Phần nội dung sẽ được thay bằng file tải từ AMIS khi bạn triển khai Selenium.")
-    doc.add_page_break()
-    doc.add_heading("Phụ lục Ảnh TSSS", level=2)
-    doc.add_paragraph("Các ảnh sẽ được chèn bên dưới…")
-    doc.save(template_path)
 
-    # Tạm thời chưa có ảnh nào (khi nối Selenium thì điền list ảnh thật)
+def run_automation(username: str, password: str, record_id: str,
+                   download_dir: str, headless: bool = True) -> Tuple[str, List[str]]:
+    """
+    Đăng nhập AMIS, tìm record_id, tải file Word và ảnh về.
+    Trả về: (đường dẫn file Word, danh sách ảnh).
+    """
+    driver = _make_driver(download_dir)
+    try:
+        # 1) Login AMIS
+        driver.get("https://amisapp.misa.vn/")
+        time.sleep(3)
+        # TODO: thay bằng selector thật của AMIS
+        driver.find_element(By.CSS_SELECTOR, "input[type=email]").send_keys(username)
+        driver.find_element(By.CSS_SELECTOR, "input[type=password]").send_keys(password)
+        driver.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
+        time.sleep(5)
+
+        # 2) Vào trang quy trình, tìm record_id
+        driver.get("https://amisapp.misa.vn/process/execute/1")
+        time.sleep(5)
+        search = driver.find_element(By.CSS_SELECTOR, "input[placeholder*='Tìm kiếm']")
+        search.clear(); search.send_keys(record_id); search.send_keys(Keys.ENTER)
+        time.sleep(3)
+        driver.find_element(By.CSS_SELECTOR, "table tbody tr").click()
+        time.sleep(3)
+
+        # 3) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
+        driver.find_element(By.XPATH, "//span[contains(.,'Xem trước mẫu in')]").click()
+        time.sleep(2)
+        driver.find_element(By.XPATH, "//div[contains(.,'Phiếu TTTT - Nhà đất')]").click()
+        time.sleep(2)
+        driver.find_element(By.XPATH, "//button[contains(.,'Tải xuống')]").click()
+        template_path = _wait_for_docx(download_dir, timeout=60)
+
+        # 4) Tải ảnh tài sản/rao bán
+        images = _download_images_from_detail(driver, download_dir)
+
+        return template_path, images
+    finally:
+        driver.quit()
+
+
+def _wait_for_docx(folder: str, timeout: int = 60) -> str:
+    for _ in range(timeout):
+        for f in os.listdir(folder):
+            if f.lower().endswith(".docx"):
+                return os.path.join(folder, f)
+        time.sleep(1)
+    raise FileNotFoundError("Không thấy file .docx sau khi tải")
+
+
+def _download_images_from_detail(driver, download_dir: str) -> List[str]:
+    """Ví dụ: lấy src của ảnh thumbnail và tải về bằng requests."""
     images: List[str] = []
+    thumbs = driver.find_elements(By.CSS_SELECTOR, "img")  # TODO: thay selector
+    for i, t in enumerate(thumbs[:10], start=1):
+        try:
+            src = t.get_attribute("src")
+            if src and src.startswith("http"):
+                r = requests.get(src, timeout=20)
+                img_path = os.path.join(download_dir, f"image_{i}.jpg")
+                with open(img_path, "wb") as f:
+                    f.write(r.content)
+                images.append(img_path)
+        except Exception:
+            pass
+    return images
 
-    return template_path, images
 
+# ===================== Xử lý Word =====================
 
-def fill_document(
-    template_path: str,
-    images: List[str],
-    signature_path: str,
-    output_path: str,
-) -> None:
-    """
-    Mở file Word template, chèn ảnh và chữ ký.
-
-    Args:
-        template_path: file Word mẫu (hợp lệ .docx)
-        images: danh sách ảnh (tài sản, sổ đỏ…) – có thể để rỗng
-        signature_path: file chữ ký (png/jpg)
-        output_path: file Word hoàn chỉnh để lưu
-    """
+def fill_document(template_path: str, images: List[str],
+                  signature_path: str, output_path: str) -> None:
+    """Mở file Word template, chèn ảnh đúng ô trong bảng 'Phụ lục Ảnh TSSS' và chữ ký."""
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template not found: {template_path}")
 
     doc = Document(template_path)
 
-    # Chèn ảnh (nếu có) vào cuối phụ lục
-    if images:
-        doc.add_paragraph("")  # cách dòng
-        for img_path in images:
-            if os.path.exists(img_path):
-                try:
-                    doc.add_picture(img_path, width=Inches(3))
-                    doc.add_paragraph("")  # cách dòng giữa ảnh
-                except Exception as e:
-                    # Không để app gãy nếu 1 ảnh lỗi
-                    doc.add_paragraph(f"[Không chèn được ảnh: {img_path}] ({e})")
+    # Map ảnh theo nhãn trong bảng
+    slot_map = {
+        "Thông tin rao bán/sổ đỏ": images[0:1],
+        "Mặt trước tài sản":       images[1:2],
+        "Tổng thể tài sản":        images[2:3],
+        "Đường phía trước tài sản": images[3:5],  # 2 ảnh
+        "Ảnh khác":                images[5:7],   # 2 ảnh
+    }
 
-    # Chèn chữ ký ở cuối (nếu có)
+    # Tìm bảng chứa chữ "Phụ lục Ảnh TSSS"
+    def _table_has_phu_luc(tbl):
+        text = "\n".join(cell.text for row in tbl.rows for cell in row.cells)
+        return "Phụ lục" in text and "Ảnh TSSS" in text
+
+    target_table = None
+    for tbl in doc.tables:
+        if _table_has_phu_luc(tbl):
+            target_table = tbl; break
+
+    if target_table:
+        for row in target_table.rows:
+            for ci, cell in enumerate(row.cells):
+                label = cell.text.strip()
+                if label in slot_map and ci+1 < len(row.cells):
+                    dest = row.cells[ci+1]
+                    for p in dest.paragraphs: 
+                        if p.text: p.text = ""
+                    for pth in slot_map[label]:
+                        if os.path.exists(pth):
+                            dest.paragraphs[0].add_run().add_picture(pth, width=Inches(2.2))
+                            dest.add_paragraph("")
+    else:
+        # fallback: chèn ảnh cuối tài liệu
+        doc.add_heading("Phụ lục Ảnh TSSS", level=2)
+        for pth in images:
+            if os.path.exists(pth):
+                doc.add_picture(pth, width=Inches(3))
+                doc.add_paragraph("")
+
+    # Chèn chữ ký
+    doc.add_page_break()
+    doc.add_heading("Chữ ký cán bộ khảo sát", level=2)
     if signature_path and os.path.exists(signature_path):
-        doc.add_page_break()
-        doc.add_heading("Chữ ký cán bộ khảo sát", level=2)
         try:
             doc.add_picture(signature_path, width=Inches(2))
         except Exception as e:
             doc.add_paragraph(f"[Không chèn được chữ ký: {e}]")
-    else:
-        doc.add_page_break()
-        doc.add_heading("Chữ ký cán bộ khảo sát", level=2)
-        doc.add_paragraph("[Chưa có chữ ký]")
 
-    # Lưu file hoàn chỉnh
-    out_dir = os.path.dirname(output_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     doc.save(output_path)
