@@ -1,7 +1,7 @@
 """Helper module for AMIS automation and document manipulation."""
 
-import os, time, base64
-from typing import List, Tuple, Optional, Callable
+import os, time
+from typing import List, Tuple
 import requests
 
 from selenium import webdriver
@@ -10,13 +10,12 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, JavascriptException
 
 from docx import Document
 from docx.shared import Inches
 
 
-# =============== Utilities ===============
+# ===================== Selenium base =====================
 
 def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     os.makedirs(download_dir, exist_ok=True)
@@ -25,6 +24,7 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    # chỉnh nếu chromium ở path khác
     opts.binary_location = "/usr/bin/chromium"
     prefs = {
         "download.default_directory": download_dir,
@@ -33,307 +33,113 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         "safebrowsing.enabled": True,
     }
     opts.add_experimental_option("prefs", prefs)
-    driver = webdriver.Chrome(options=opts)
-    driver.set_window_size(1440, 900)
-    return driver
+    drv = webdriver.Chrome(options=opts)
+    drv.set_window_size(1440, 900)
+    return drv
 
-def _safe_click(driver, el):
-    try:
-        el.click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", el)
 
-def _switch_to_last_tab(driver: webdriver.Chrome):
-    try:
-        if len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[-1])
-    except Exception:
-        pass
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
+# ===================== MAIN =====================
 
-def _dump_debug(driver, download_dir: str, tag: str):
-    try:
-        with open(os.path.join(download_dir, f"debug_{tag}.html"), "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-    except Exception:
-        pass
-    try:
-        path = os.path.join(download_dir, f"debug_{tag}.png")
-        driver.save_screenshot(path)
-    except Exception:
-        pass
-    # Liệt kê iframe src
-    try:
-        frames = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
-        with open(os.path.join(download_dir, f"frames_{tag}.txt"), "w", encoding="utf-8") as f:
-            for i, fr in enumerate(frames, 1):
-                try:
-                    src = fr.get_attribute("src")
-                except Exception:
-                    src = ""
-                try:
-                    name = fr.get_attribute("name")
-                except Exception:
-                    name = ""
-                f.write(f"{i}. name={name} src={src}\n")
-    except Exception:
-        pass
-
-# =============== Find in iframes & shadow DOM ===============
-
-def _for_each_frame(driver: webdriver.Chrome, fn: Callable[[], Optional[object]]) -> Optional[object]:
-    # thử ở current
-    try:
-        res = fn()
-        if res is not None:
-            return res
-    except Exception:
-        pass
-    # duyệt iframe
-    frames = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
-    for idx in range(len(frames)):
-        try:
-            driver.switch_to.frame(idx)
-            res = _for_each_frame(driver, fn)
-            driver.switch_to.parent_frame()
-            if res is not None:
-                return res
-        except Exception:
-            try:
-                driver.switch_to.parent_frame()
-            except Exception:
-                pass
-    return None
-
-def _query_shadow_dom(driver, js_selector: str):
+def run_automation(
+    username: str,
+    password: str,
+    record_id: str,
+    download_dir: str,
+    headless: bool = True,
+) -> Tuple[str, List[str]]:
     """
-    Đi xuyên shadow DOM mở. js_selector là chuỗi JS:
-    ví dụ: "return (function(){ const hosts=[...document.querySelectorAll('some-host')]; ...; return el; })();"
+    Đăng nhập AMIS, tìm record_id bằng ô 'Tìm kiếm thông minh với AI', tải file Word và ảnh.
     """
-    try:
-        return driver.execute_script(js_selector)
-    except JavascriptException:
-        return None
-
-def _find_search_shadow(driver):
-    # Thử path shadow dựa trên gợi ý của bạn trước đó (#top_nav ... textarea)
-    # và thử cả input với placeholder có 'Tìm kiếm'
-    scripts = [
-        # theo path cụ thể (nếu global-search dùng shadow host)
-        """
-        return (function() {
-            const pick = (root) => root && (root.querySelector("textarea[placeholder*='Tìm kiếm']") ||
-                                            root.querySelector("input[placeholder*='Tìm kiếm']") ||
-                                            root.querySelector("input[placeholder*='Nhấn Enter']"));
-            const walk = (node) => {
-                if (!node) return null;
-                let hit = pick(node);
-                if (hit) return hit;
-                const hosts = node.querySelectorAll("*");
-                for (const h of hosts) {
-                    if (h.shadowRoot) {
-                        let el = pick(h.shadowRoot);
-                        if (el) return el;
-                        el = walk(h.shadowRoot);
-                        if (el) return el;
-                    }
-                }
-                return null;
-            };
-            return walk(document);
-        })();
-        """,
-    ]
-    for js in scripts:
-        el = _query_shadow_dom(driver, js)
-        if el:
-            return el
-    return None
-
-def _find_in_any_frame_or_shadow(driver: webdriver.Chrome, candidates: List[tuple]) -> Optional[object]:
-    # Bắt đầu ở default
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
-
-    # 1) thử thẳng DOM thường
-    for by, sel in candidates:
-        els = driver.find_elements(by, sel)
-        if els:
-            return els[0]
-
-    # 2) thử shadow DOM mở
-    el = _find_search_shadow(driver)
-    if el:
-        return el
-
-    # 3) thử toàn bộ iframe (bên trong mỗi frame cũng thử DOM thường + shadow)
-    def finder():
-        # DOM thường
-        for by, sel in candidates:
-            try:
-                el2 = driver.find_element(by, sel)
-                return el2
-            except NoSuchElementException:
-                continue
-        # shadow
-        return _find_search_shadow(driver)
-
-    return _for_each_frame(driver, finder)
-
-def _wait_in_any_frame_or_shadow(driver: webdriver.Chrome, candidates: List[tuple], timeout: int = 35) -> object:
-    end = time.time() + timeout
-    while time.time() < end:
-        el = _find_in_any_frame_or_shadow(driver, candidates)
-        if el is not None:
-            return el
-        time.sleep(0.5)
-    raise TimeoutException("Timeout waiting element (any frame/shadow)")
-
-# =============== App-specific small helpers ===============
-
-def _close_popups_soft(driver):
-    for by, sel in [
-        (By.XPATH, "//button[contains(.,'Bỏ qua') or contains(.,'Tiếp tục làm việc') or contains(.,'Đóng')]"),
-        (By.CSS_SELECTOR, "[aria-label='Close'],[data-dismiss],.close"),
-    ]:
-        try:
-            el = driver.find_element(by, sel)
-            _safe_click(driver, el)
-            time.sleep(0.2)
-        except Exception:
-            pass
-
-def _try_open_modules(driver):
-    # Thử click các nút/tab hay gặp để vào đúng màn hình quy trình/lượt chạy
-    for by, sel in [
-        (By.XPATH, "//a[contains(.,'Quy trình')]"),
-        (By.XPATH, "//*[contains(.,'Lượt chạy')]"),
-        (By.XPATH, "//button//*[name()='svg' or contains(.,'Tìm kiếm')]/ancestor::button[1]"),
-    ]:
-        try:
-            el = driver.find_element(by, sel)
-            _safe_click(driver, el)
-            time.sleep(0.4)
-        except Exception:
-            pass
-
-# =============== Main ===============
-
-def run_automation(username: str, password: str, record_id: str,
-                   download_dir: str, headless: bool = True) -> Tuple[str, List[str]]:
-
     driver = _make_driver(download_dir, headless=headless)
-    wait = WebDriverWait(driver, 40)
+    wait = WebDriverWait(driver, 30)
 
     try:
         # 1) Login
         driver.get("https://amisapp.misa.vn/")
-        username_input = wait.until(EC.presence_of_element_located((
+        user_el = wait.until(EC.presence_of_element_located((
             By.CSS_SELECTOR,
-            "#box-login-right > div > div > div.login-form-basic-container > "
-            "div > div.login-form-inputs.login-class > "
-            "div.wrap-input.username-wrap.validate-input > input",
+            "#box-login-right .login-form-inputs .username-wrap input",
         )))
-        username_input.send_keys(username)
+        user_el.send_keys(username)
 
-        password_input = driver.find_element(
-            By.CSS_SELECTOR,
-            "#box-login-right > div > div > div.login-form-basic-container > "
-            "div > div.login-form-inputs.login-class > "
-            "div.wrap-input.pass-wrap.validate-input > input",
-        )
-        password_input.send_keys(password)
+        pw_el = driver.find_element(By.CSS_SELECTOR,
+            "#box-login-right .login-form-inputs .pass-wrap input")
+        pw_el.send_keys(password)
 
-        driver.find_element(
-            By.CSS_SELECTOR,
-            "#box-login-right > div > div > div.login-form-basic-container > "
-            "div > div.login-form-btn-container.login-class > button",
-        ).click()
+        driver.find_element(By.CSS_SELECTOR,
+            "#box-login-right .login-form-btn-container button").click()
 
         wait.until(EC.url_contains("amisapp.misa.vn"))
         time.sleep(0.8)
-        _close_popups_soft(driver)
 
-        # 2) Điều hướng vào quy trình / lượt chạy
+        # Có popup "Bỏ qua, tiếp tục làm việc" thì đóng (best-effort)
+        for by, sel in [
+            (By.XPATH, "//button[contains(.,'Bỏ qua')]"),
+            (By.XPATH, "//button[contains(.,'Tiếp tục làm việc')]"),
+            (By.XPATH, "//button[contains(.,'Đóng')]"),
+        ]:
+            try:
+                driver.find_element(by, sel).click(); time.sleep(0.2)
+            except Exception:
+                pass
+
+        # 2) Vào trang Quy trình (Lượt chạy)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        time.sleep(0.6)
-        _switch_to_last_tab(driver)
-        _close_popups_soft(driver)
-        _try_open_modules(driver)
+        time.sleep(0.8)
 
-        # 3) Tìm ô tìm kiếm (input/textarea/role search) — DOM thường, shadow DOM, hoặc iframe
-        search = _wait_in_any_frame_or_shadow(
-            driver,
-            candidates=[
-                (By.CSS_SELECTOR, "input[placeholder*='Tìm kiếm']"),
-                (By.CSS_SELECTOR, "input[placeholder*='Nhấn Enter']"),
-                (By.CSS_SELECTOR, "input[type='search']"),
-                (By.XPATH, "//input[contains(@placeholder,'Tìm kiếm') or contains(@placeholder,'Nhấn Enter')]"),
-                (By.XPATH, "//*[@role='search']//input"),
-                (By.XPATH, "//textarea[contains(@placeholder,'Tìm kiếm')]"),
-            ],
-            timeout=40,
-        )
-
-        # 4) Nhập record_id & Enter
+        # 3) Gõ ID vào ô tìm kiếm thông minh (textarea.global-search-input) rồi Enter
+        search = wait.until(EC.element_to_be_clickable((
+            By.CSS_SELECTOR, "textarea.global-search-input"
+        )))
         try:
             search.clear()
         except Exception:
-            search.send_keys(Keys.CONTROL, "a")
-            search.send_keys(Keys.BACK_SPACE)
+            search.send_keys(Keys.CONTROL, "a"); search.send_keys(Keys.BACK_SPACE)
+
         search.send_keys(record_id)
         search.send_keys(Keys.ENTER)
 
-        # 5) Chọn dòng đầu tiên
-        first_row = _wait_in_any_frame_or_shadow(
-            driver,
-            candidates=[
-                (By.CSS_SELECTOR, "table tbody tr"),
-                (By.XPATH, "(//table//tbody//tr)[1]"),
-            ],
-            timeout=40,
-        )
-        _safe_click(driver, first_row)
+        # 4) Click kết quả mang đúng ID (panel “Kết quả tìm kiếm…”)
+        #    a) ưu tiên link hiển thị chính xác ID
+        try:
+            result_link = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((
+                By.XPATH, f"//a[normalize-space()='{record_id}']"
+            )))
+        except Exception:
+            #    b) fallback: link chứa ID trong text
+            result_link = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((
+                By.XPATH, f"//a[contains(.,'{record_id}')]"
+            )))
+        driver.execute_script("arguments[0].click();", result_link)
+        time.sleep(1.0)
+
+        # 5) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
+        wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//span[contains(.,'Xem trước mẫu in')]"
+        ))).click()
         time.sleep(0.8)
 
-        # 6) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
-        btn_preview = _wait_in_any_frame_or_shadow(
-            driver, [(By.XPATH, "//span[contains(.,'Xem trước mẫu in')]")], timeout=40
-        )
-        _safe_click(driver, btn_preview)
+        wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//div[contains(.,'Phiếu TTTT - Nhà đất')]"
+        ))).click()
         time.sleep(0.6)
 
-        item_phieu = _wait_in_any_frame_or_shadow(
-            driver, [(By.XPATH, "//div[contains(.,'Phiếu TTTT - Nhà đất')]")], timeout=40
-        )
-        _safe_click(driver, item_phieu)
-        time.sleep(0.6)
-
-        btn_download = _wait_in_any_frame_or_shadow(
-            driver, [(By.XPATH, "//button[contains(.,'Tải xuống')]")], timeout=40
-        )
-        _safe_click(driver, btn_download)
+        wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//button[contains(.,'Tải xuống')]"
+        ))).click()
 
         template_path = _wait_for_docx(download_dir, timeout=60)
 
-        # 7) Ảnh (placeholder)
+        # 6) Tải một vài ảnh minh họa (tùy chỉnh sau nếu cần)
         images = _download_images_from_detail(driver, download_dir)
 
         return template_path, images
 
-    except Exception as e:
-        # Ghi debug trước khi raise để bạn xem được trên Streamlit
-        _dump_debug(driver, download_dir, "fail")
-        raise
     finally:
         driver.quit()
 
-# =============== Download helpers ===============
+
+# ===================== Helpers =====================
 
 def _wait_for_docx(folder: str, timeout: int = 60) -> str:
     for _ in range(timeout):
@@ -346,20 +152,20 @@ def _wait_for_docx(folder: str, timeout: int = 60) -> str:
 def _download_images_from_detail(driver, download_dir: str) -> List[str]:
     images: List[str] = []
     thumbs = driver.find_elements(By.CSS_SELECTOR, "img")
-    for i, t in enumerate(thumbs[:10], start=1):
+    for i, t in enumerate(thumbs[:8], start=1):
         try:
             src = t.get_attribute("src")
             if src and src.startswith("http"):
-                r = requests.get(src, timeout=20)
-                img_path = os.path.join(download_dir, f"image_{i}.jpg")
-                with open(img_path, "wb") as f:
-                    f.write(r.content)
-                images.append(img_path)
+                r = requests.get(src, timeout=15)
+                p = os.path.join(download_dir, f"image_{i}.jpg")
+                with open(p, "wb") as f: f.write(r.content)
+                images.append(p)
         except Exception:
             pass
     return images
 
-# =============== Word processing ===============
+
+# ===================== Word processing =====================
 
 def fill_document(template_path: str, images: List[str],
                   signature_path: str, output_path: str) -> None:
@@ -411,5 +217,6 @@ def fill_document(template_path: str, images: List[str],
             doc.add_picture(signature_path, width=Inches(2))
         except Exception as e:
             doc.add_paragraph(f"[Không chèn được chữ ký: {e}]")
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     doc.save(output_path)
