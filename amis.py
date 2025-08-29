@@ -85,8 +85,7 @@ def run_automation(
             (By.CSS_SELECTOR, "[aria-label='Close'],[data-dismiss],.close"),
         ]:
             try:
-                driver.find_element(by, sel).click()
-                time.sleep(0.2)
+                driver.find_element(by, sel).click(); time.sleep(0.2)
             except Exception:
                 pass
 
@@ -94,7 +93,7 @@ def run_automation(
         driver.get("https://amisapp.misa.vn/process/execute/1")
         time.sleep(0.8)
 
-        # Đảm bảo đúng tab "Lượt chạy" (nếu tồn tại)
+        # (khuyến nghị) đảm bảo đúng tab "Lượt chạy"
         try:
             tab_runs = WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.XPATH, "//a[contains(.,'Lượt chạy')]"))
@@ -104,45 +103,63 @@ def run_automation(
         except Exception:
             pass
 
-        # 3) Tìm ô tìm kiếm (textarea.global-search-input hoặc biến thể placeholder)
-        candidates = [
-            (By.CSS_SELECTOR, "textarea.global-search-input"),
-            (By.CSS_SELECTOR, "textarea[placeholder*='Tìm kiếm']"),
-            (By.CSS_SELECTOR, "input.global-search-input"),
-            (By.XPATH, "//*[self::textarea or self::input][contains(@placeholder,'Tìm kiếm')]"),
-        ]
-
-        search_el = None
-        for by, sel in candidates:
+        # 3) Tìm ô tìm kiếm bằng POLL JS (tránh phụ thuộc clickable/overlay)
+        def _poll_search_el(timeout_s=25):
+            end = time.time() + timeout_s
+            # luôn về khung gốc
             try:
-                els = WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((by, sel))
-                )
-                # chọn phần tử ĐANG hiển thị
-                for e in els:
-                    if e.is_displayed():
-                        search_el = e
-                        break
-                if search_el:
-                    break
+                driver.switch_to.default_content()
             except Exception:
-                continue
+                pass
+
+            js = """
+return (function(){
+  const sel = "textarea.global-search-input,textarea[placeholder*='Tìm kiếm'],input.global-search-input,input[placeholder*='Tìm kiếm']";
+  const el = document.querySelector(sel);
+  if (!el) return null;
+  const style = window.getComputedStyle(el);
+  const visible = style && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
+  return visible ? el : null;
+})();
+"""
+            while time.time() < end:
+                try:
+                    el = driver.execute_script(js)
+                    if el: return el
+                except Exception:
+                    pass
+                time.sleep(0.4)
+            return None
+
+        search_el = _poll_search_el(timeout_s=18)
+
+        # Nếu chưa thấy, thử phím tắt '/' rồi poll lại
+        if not search_el:
+            try:
+                body = driver.find_element(By.TAG_NAME, "body")
+                body.send_keys("/")
+                time.sleep(0.6)
+            except Exception:
+                pass
+            search_el = _poll_search_el(timeout_s=12)
 
         if not search_el:
             raise TimeoutException("Không tìm thấy ô tìm kiếm thông minh (global-search-input).")
 
-        # 4) Bơm record_id và nhấn Enter bằng JavaScript (tránh yêu cầu clickable)
+        # 4) Bơm record_id & nhấn Enter bằng JS (mô phỏng thao tác tay)
         driver.execute_script("""
 const el = arguments[0];
+const val = arguments[1];
 el.focus();
-try { el.select && el.select(); } catch(e) {}
-el.value = arguments[1];
-el.dispatchEvent(new Event('input', {bubbles: true}));
+try { el.select && el.select(); } catch(e){}
+el.value = val;
+el.dispatchEvent(new Event('input', {bubbles:true}));
 el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
 el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubbles:true}));
-        """, search_el, record_id)
+""", search_el, record_id)
 
         # 5) Chờ panel kết quả và click đúng ID
+        # Ưu tiên link text == ID, fallback chứa ID
         try:
             result_link = WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.XPATH, f"//a[normalize-space()='{record_id}']"))
@@ -172,7 +189,7 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
 
         template_path = _wait_for_docx(download_dir, timeout=60)
 
-        # 7) Tải một vài ảnh (có thể chỉnh selector thumbnail sau)
+        # 7) Tải vài ảnh (placeholder; có thể chỉnh selector thumbnail sau)
         images = _download_images_from_detail(driver, download_dir)
 
         return template_path, images
@@ -225,7 +242,7 @@ def fill_document(template_path: str, images: List[str],
 
     def _table_has_phu_luc(tbl):
         text = "\n".join(cell.text for row in tbl.rows for cell in row.cells)
-        return "Phụ lục" in text and "Ảnh TSSS" in text
+        return "Phụ lục" in text và "Ảnh TSSS" in text
 
     target_table = None
     for tbl in doc.tables:
