@@ -12,12 +12,14 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from docx import Document
 from docx.shared import Inches
 
 
-# ===================== Selenium phần login + download =====================
+# ===================== Selenium: login + download =====================
 
 def _make_driver(download_dir: str) -> webdriver.Chrome:
     """Tạo Chrome headless với thư mục tải cụ thể (dùng trên Streamlit Cloud)."""
@@ -46,15 +48,42 @@ def run_automation(username: str, password: str, record_id: str,
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
     driver = _make_driver(download_dir)
+    wait = WebDriverWait(driver, 20)
+
     try:
         # 1) Login AMIS
         driver.get("https://amisapp.misa.vn/")
+        # Nhập Username
+        username_input = wait.until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "#box-login-right > div > div > div.login-form-basic-container > "
+                "div > div.login-form-inputs.login-class > "
+                "div.wrap-input.username-wrap.validate-input > input"
+            ))
+        )
+        username_input.send_keys(username)
+
+        # Nhập Password
+        password_input = driver.find_element(
+            By.CSS_SELECTOR,
+            "#box-login-right > div > div > div.login-form-basic-container > "
+            "div > div.login-form-inputs.login-class > "
+            "div.wrap-input.pass-wrap.validate-input > input"
+        )
+        password_input.send_keys(password)
+
+        # Click nút Đăng nhập
+        login_btn = driver.find_element(
+            By.CSS_SELECTOR,
+            "#box-login-right > div > div > div.login-form-basic-container > "
+            "div > div.login-form-btn-container.login-class > button"
+        )
+        login_btn.click()
+
+        # Chờ tới khi login thành công (URL chứa amisapp.misa.vn)
+        wait.until(EC.url_contains("amisapp.misa.vn"))
         time.sleep(3)
-        # TODO: thay bằng selector thật của AMIS
-        driver.find_element(By.CSS_SELECTOR, "input[type=email]").send_keys(username)
-        driver.find_element(By.CSS_SELECTOR, "input[type=password]").send_keys(password)
-        driver.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
-        time.sleep(5)
 
         # 2) Vào trang quy trình, tìm record_id
         driver.get("https://amisapp.misa.vn/process/execute/1")
@@ -93,7 +122,7 @@ def _wait_for_docx(folder: str, timeout: int = 60) -> str:
 def _download_images_from_detail(driver, download_dir: str) -> List[str]:
     """Ví dụ: lấy src của ảnh thumbnail và tải về bằng requests."""
     images: List[str] = []
-    thumbs = driver.find_elements(By.CSS_SELECTOR, "img")  # TODO: thay selector
+    thumbs = driver.find_elements(By.CSS_SELECTOR, "img")  # TODO: chỉnh selector cho đúng thumbnail ảnh trong AMIS
     for i, t in enumerate(thumbs[:10], start=1):
         try:
             src = t.get_attribute("src")
