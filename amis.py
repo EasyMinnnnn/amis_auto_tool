@@ -1,6 +1,7 @@
 """Helper module for AMIS automation and document manipulation."""
 
-import os, time
+import os
+import time
 from typing import List, Tuple
 import requests
 
@@ -15,6 +16,7 @@ from selenium.common.exceptions import TimeoutException
 from docx import Document
 from docx.shared import Inches
 
+
 # ===================== Selenium base =====================
 
 def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
@@ -24,8 +26,10 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    # chỉnh nếu chromium ở path khác
-    opts.binary_location = "/usr/bin/chromium"
+    # CHÚ Ý: chỉ bật dòng dưới nếu chắc chắn Chromium ở đúng path trên máy/chỗ deploy.
+    # Nếu chạy trên Streamlit Cloud, thường KHÔNG cần đặt binary_location.
+    # opts.binary_location = "/usr/bin/chromium"
+
     prefs = {
         "download.default_directory": download_dir,
         "download.prompt_for_download": False,
@@ -33,9 +37,11 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         "safebrowsing.enabled": True,
     }
     opts.add_experimental_option("prefs", prefs)
+
     drv = webdriver.Chrome(options=opts)
     drv.set_window_size(1440, 900)
     return drv
+
 
 # ===================== MAIN =====================
 
@@ -47,7 +53,8 @@ def run_automation(
     headless: bool = True,
 ) -> Tuple[str, List[str]]:
     """
-    Đăng nhập AMIS, nhập ID vào ô 'Tìm kiếm thông minh với AI', mở chi tiết, tải file Word, lấy ảnh.
+    Đăng nhập AMIS, nhập ID vào ô 'Tìm kiếm thông minh với AI', mở chi tiết,
+    tải file Word, lấy ảnh.
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
     driver = _make_driver(download_dir, headless=headless)
@@ -85,7 +92,8 @@ def run_automation(
             (By.CSS_SELECTOR, "[aria-label='Close'],[data-dismiss],.close"),
         ]:
             try:
-                driver.find_element(by, sel).click(); time.sleep(0.2)
+                driver.find_element(by, sel).click()
+                time.sleep(0.2)
             except Exception:
                 pass
 
@@ -125,7 +133,8 @@ return (function(){
             while time.time() < end:
                 try:
                     el = driver.execute_script(js)
-                    if el: return el
+                    if el:
+                        return el
                 except Exception:
                     pass
                 time.sleep(0.4)
@@ -197,6 +206,7 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
     finally:
         driver.quit()
 
+
 # ===================== Helpers =====================
 
 def _wait_for_docx(folder: str, timeout: int = 60) -> str:
@@ -206,6 +216,7 @@ def _wait_for_docx(folder: str, timeout: int = 60) -> str:
                 return os.path.join(folder, f)
         time.sleep(1)
     raise FileNotFoundError("Không thấy file .docx sau khi tải")
+
 
 def _download_images_from_detail(driver, download_dir: str) -> List[str]:
     images: List[str] = []
@@ -222,6 +233,7 @@ def _download_images_from_detail(driver, download_dir: str) -> List[str]:
         except Exception:
             pass
     return images
+
 
 # ===================== Word processing =====================
 
@@ -242,21 +254,23 @@ def fill_document(template_path: str, images: List[str],
 
     def _table_has_phu_luc(tbl):
         text = "\n".join(cell.text for row in tbl.rows for cell in row.cells)
-        return "Phụ lục" in text và "Ảnh TSSS" in text
+        return ("Phụ lục" in text) and ("Ảnh TSSS" in text)
 
     target_table = None
     for tbl in doc.tables:
         if _table_has_phu_luc(tbl):
-            target_table = tbl; break
+            target_table = tbl
+            break
 
     if target_table:
         for row in target_table.rows:
             for ci, cell in enumerate(row.cells):
                 label = cell.text.strip()
-                if label in slot_map and ci+1 < len(row.cells):
-                    dest = row.cells[ci+1]
+                if label in slot_map and ci + 1 < len(row.cells):
+                    dest = row.cells[ci + 1]
                     for p in dest.paragraphs:
-                        if p.text: p.text = ""
+                        if p.text:
+                            p.text = ""
                     for pth in slot_map[label]:
                         if os.path.exists(pth):
                             dest.paragraphs[0].add_run().add_picture(pth, width=Inches(2.2))
