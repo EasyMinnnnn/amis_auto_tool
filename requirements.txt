@@ -1,0 +1,5 @@
+streamlit>=1.22
+selenium>=4.15
+python-docx>=0.8.11
+pillow>=9.3
+requests>=2.31
