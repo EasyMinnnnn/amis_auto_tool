@@ -8,13 +8,13 @@ from datetime import datetime
 
 import streamlit as st
 
-# Import the helper functions from the amis module within this package.
-from . import amis
+# Dùng import tuyệt đối vì app.py và amis.py đang ở cùng thư mục (không phải package)
+import amis
 
 
 def main() -> None:
     st.set_page_config(page_title="AMIS Automation", layout="centered")
-    st.title("AMIS Auto‑Downloader")
+    st.title("AMIS Auto-Downloader")
     st.write(
         """
         This tool automates the process of downloading the property information
@@ -62,7 +62,7 @@ def main() -> None:
                 st.exception(e)
                 return
 
-            st.success("Downloaded Word template and images. Preparing your document…")
+            st.success("Downloaded Word template and images.  Preparing your document…")
 
             # Determine output path
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
