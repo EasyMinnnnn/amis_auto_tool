@@ -8,7 +8,6 @@ import requests
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -24,9 +23,14 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
+    # Các flag an toàn phổ biến cho môi trường container/Cloud:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    # opts.binary_location = "/usr/bin/chromium"  # bật nếu cần
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1440,900")
+    # Nếu chắc chắn chromium ở path cụ thể thì mở dòng dưới (Cloud thường KHÔNG cần):
+    # opts.binary_location = "/usr/bin/chromium"
+
     prefs = {
         "download.default_directory": download_dir,
         "download.prompt_for_download": False,
@@ -34,8 +38,8 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
         "safebrowsing.enabled": True,
     }
     opts.add_experimental_option("prefs", prefs)
+
     drv = webdriver.Chrome(options=opts)
-    drv.set_window_size(1440, 900)
     return drv
 
 
@@ -48,6 +52,7 @@ def _switch_to_possible_iframes(driver) -> bool:
     except Exception:
         pass
 
+    # Thử theo id/name phổ biến
     candidates = ["app-iframe", "main-iframe", "content-iframe", "amis-iframe"]
     for c in candidates:
         for by in (By.ID, By.NAME):
@@ -60,6 +65,7 @@ def _switch_to_possible_iframes(driver) -> bool:
             except Exception:
                 pass
 
+    # Nếu không có id/name, thử iframe đầu tiên có input/textarea
     try:
         iframes = driver.find_elements(By.TAG_NAME, "iframe")
         for f in iframes:
@@ -73,6 +79,7 @@ def _switch_to_possible_iframes(driver) -> bool:
     except Exception:
         pass
 
+    # Không tìm thấy iframe phù hợp -> về khung gốc
     try:
         driver.switch_to.default_content()
     except Exception:
@@ -108,7 +115,7 @@ def run_automation(
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
     driver = _make_driver(download_dir, headless=headless)
-    wait = WebDriverWait(driver, 35)
+    wait = WebDriverWait(driver, 45)
 
     try:
         # 1) Login
@@ -132,7 +139,7 @@ def run_automation(
         ).click()
 
         wait.until(EC.url_contains("amisapp.misa.vn"))
-        time.sleep(0.8)
+        time.sleep(1.0)
 
         # Đóng popup 2FA/onboarding nếu có (best-effort)
         for by, sel in [
@@ -149,29 +156,36 @@ def run_automation(
 
         # 2) Mở trang Quy trình (Lượt chạy)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        time.sleep(0.8)
+        time.sleep(1.0)
 
         # (khuyến nghị) đảm bảo đúng tab "Lượt chạy"
         try:
-            tab_runs = WebDriverWait(driver, 5).until(
+            tab_runs = WebDriverWait(driver, 8).until(
                 EC.presence_of_element_located((By.XPATH, "//a[contains(.,'Lượt chạy')]"))
             )
             driver.execute_script("arguments[0].click();", tab_runs)
-            time.sleep(0.4)
+            time.sleep(0.5)
         except Exception:
             pass
 
         # 3) Tìm ô tìm kiếm bằng POLL JS (robust, hỗ trợ iframe + nhiều selector)
-        def _poll_search_el(timeout_s=35):
+        def _poll_search_el(timeout_s=40):
             end = time.time() + timeout_s
 
             selectors = [
+                # class “global-search-input”
                 "textarea.global-search-input",
                 "input.global-search-input",
-                "textarea[placeholder*='Tìm kiếm']",
+                # placeholder tiếng Việt (thường gặp)
+                "textarea[placeholder*='Tìm kiếm']",              # generic
                 "input[placeholder*='Tìm kiếm']",
+                "input[placeholder*='Tìm kiếm thông minh']",      # cụ thể hơn
+                # aria-label
+                "[aria-label*='Tìm kiếm']",
+                # ARIA roles/common search boxes
                 "input[type='search']",
                 "[role='search'] input",
+                # Fallback: bất kỳ input/textarea có placeholder, còn hiển thị
                 "input[placeholder], textarea[placeholder]",
             ]
 
@@ -189,7 +203,7 @@ return (function(){{
             while time.time() < end:
                 _switch_to_possible_iframes(driver)
 
-                # thử phím tắt "/" để bật ô search nếu hỗ trợ
+                # thử phím tắt "/" để bật ô search nếu UI hỗ trợ
                 try:
                     body = driver.find_element(By.TAG_NAME, "body")
                     body.send_keys("/")
@@ -204,11 +218,11 @@ return (function(){{
                     except Exception:
                         pass
 
-                time.sleep(0.5)
+                time.sleep(0.6)
 
             return None
 
-        search_el = _poll_search_el(timeout_s=35)
+        search_el = _poll_search_el(timeout_s=40)
 
         if not search_el:
             _dump_debug(driver, download_dir, "no_global_search")
@@ -231,11 +245,11 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
 
         # 5) Chờ panel kết quả và click đúng ID
         try:
-            result_link = WebDriverWait(driver, 20).until(
+            result_link = WebDriverWait(driver, 25).until(
                 EC.presence_of_element_located((By.XPATH, f"//a[normalize-space()='{record_id}']"))
             )
         except Exception:
-            result_link = WebDriverWait(driver, 20).until(
+            result_link = WebDriverWait(driver, 25).until(
                 EC.presence_of_element_located((By.XPATH, f"//a[contains(.,'{record_id}')]"))
             )
 
@@ -258,7 +272,7 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
             By.XPATH, "//button[contains(.,'Tải xuống')]"
         ))).click()
 
-        template_path = _wait_for_docx(download_dir, timeout=60)
+        template_path = _wait_for_docx(download_dir, timeout=90)
 
         # 7) Tải vài ảnh (placeholder; có thể chỉnh selector thumbnail sau)
         images = _download_images_from_detail(driver, download_dir)
@@ -271,7 +285,7 @@ el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubble
 
 # ===================== Helpers =====================
 
-def _wait_for_docx(folder: str, timeout: int = 60) -> str:
+def _wait_for_docx(folder: str, timeout: int = 90) -> str:
     for _ in range(timeout):
         for f in os.listdir(folder):
             if f.lower().endswith(".docx"):
