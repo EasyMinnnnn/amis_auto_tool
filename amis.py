@@ -43,6 +43,71 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
     return driver
 
 
+def _wait_clickable(wait: WebDriverWait, by: By, value: str):
+    return wait.until(EC.element_to_be_clickable((by, value)))
+
+
+def _open_global_search(driver: webdriver.Chrome, wait: WebDriverWait):
+    """
+    Mở Global Search ở top-nav nếu đang đóng, sau đó trả về phần tử ô tìm kiếm.
+    Thử nhiều selector để tránh phụ thuộc UI thay đổi (textarea / input).
+    """
+    # Luôn về khung gốc (top_nav không nằm trong iframe nội dung)
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    # 1) Nếu textarea/input đã có sẵn thì trả về luôn
+    quick_selectors = [
+        (By.CSS_SELECTOR, "#top_nav textarea"),
+        (By.CSS_SELECTOR, "textarea[placeholder*='Tìm kiếm']"),
+        (By.XPATH, "//textarea[contains(@placeholder,'Tìm kiếm')]"),
+        (By.XPATH, "//input[contains(@placeholder,'Tìm kiếm')]"),
+    ]
+    for by, sel in quick_selectors:
+        els = driver.find_elements(by, sel)
+        if els:
+            return els[0]
+
+    # 2) Thử bấm icon mở Global Search (kính lúp)
+    #   Thử nhiều khả năng tên lớp/aria-label khác nhau
+    openers = [
+        (By.CSS_SELECTOR, "#top_nav .global-search-wrap .icon, #top_nav .global-search-wrap button"),
+        (By.CSS_SELECTOR, "#top_nav [aria-label*='Tìm kiếm']"),
+        (By.CSS_SELECTOR, "#top_nav .global-search-wrap svg"),
+        (By.XPATH, "//*[@id='top_nav']//*[self::button or self::div]//*[name()='svg' or contains(.,'Tìm kiếm')]/ancestor::*[self::button or self::div][1]"),
+    ]
+    clicked = False
+    for by, sel in openers:
+        try:
+            btn = _wait_clickable(wait, by, sel)
+            btn.click()
+            clicked = True
+            break
+        except Exception:
+            continue
+
+    # 3) Một số hệ thống bật Global Search bằng phím tắt ('/' hoặc Ctrl+K)
+    if not clicked:
+        try:
+            body = driver.find_element(By.TAG_NAME, "body")
+            body.send_keys("/")   # thử '/'
+            time.sleep(0.5)
+            body.send_keys(Keys.CONTROL, "k")  # thử Ctrl+K
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+    # 4) Chờ ô tìm kiếm xuất hiện rồi trả về
+    return wait.until(
+        EC.presence_of_element_located((
+            By.XPATH,
+            "//textarea[contains(@placeholder,'Tìm kiếm')] | //input[contains(@placeholder,'Tìm kiếm')]"
+        ))
+    )
+
+
 def run_automation(
     username: str,
     password: str,
@@ -55,7 +120,7 @@ def run_automation(
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
     driver = _make_driver(download_dir)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 25)
 
     try:
         # 1) Login AMIS
@@ -93,18 +158,29 @@ def run_automation(
 
         # Chờ tới khi login thành công (URL chứa amisapp.misa.vn)
         wait.until(EC.url_contains("amisapp.misa.vn"))
-        time.sleep(3)
+        time.sleep(2)
 
-        # 2) Vào trang quy trình, tìm record_id
+        # 2) Vào trang quy trình (execute/1) rồi mở Global Search để tìm record_id
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        # Chờ phần tìm kiếm xuất hiện (trên AMIS là <textarea>, không phải <input>)
-        search = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "textarea[placeholder*='Tìm kiếm']")
-            )
-        )
-        # Nhập và tìm
-        search.clear()
+
+        # Đợi top_nav có mặt (đảm bảo header đã render)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav")))
+        time.sleep(0.5)
+
+        search = _open_global_search(driver, wait)
+        # Đảm bảo có thể thao tác
+        try:
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//*[self::textarea or self::input][contains(@placeholder,'Tìm kiếm')]")))
+        except Exception:
+            pass
+
+        # Nhập & tìm
+        try:
+            search.clear()
+        except Exception:
+            # một số textarea không hỗ trợ clear(); dùng tổ hợp phím
+            search.send_keys(Keys.CONTROL, "a")
+            search.send_keys(Keys.BACK_SPACE)
         search.send_keys(record_id)
         search.send_keys(Keys.ENTER)
 
@@ -113,7 +189,7 @@ def run_automation(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "table tbody tr"))
         )
         first_row.click()
-        time.sleep(2)
+        time.sleep(1.5)
 
         # 3) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
         wait.until(
@@ -121,14 +197,14 @@ def run_automation(
                 (By.XPATH, "//span[contains(.,'Xem trước mẫu in')]")
             )
         ).click()
-        time.sleep(1.5)
+        time.sleep(1)
 
         wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH, "//div[contains(.,'Phiếu TTTT - Nhà đất')]")
             )
         ).click()
-        time.sleep(1.5)
+        time.sleep(1)
 
         wait.until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(.,'Tải xuống')]"))
