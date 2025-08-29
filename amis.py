@@ -20,14 +20,15 @@ from docx.shared import Inches
 
 # ===================== Selenium: login + download =====================
 
-def _make_driver(download_dir: str) -> webdriver.Chrome:
-    """Tạo Chrome headless với thư mục tải cụ thể (dùng trên Streamlit Cloud)."""
+def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
+    """Tạo Chrome với thư mục tải cụ thể (dùng tốt trên Streamlit Cloud)."""
     os.makedirs(download_dir, exist_ok=True)
     opts = Options()
-    opts.add_argument("--headless=new")
+    if headless:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    # Nếu môi trường có Chromium theo path khác, chỉnh lại dòng dưới:
+    # Nếu môi trường Chromium có path khác, chỉnh lại dòng dưới:
     opts.binary_location = "/usr/bin/chromium"
 
     prefs = {
@@ -43,71 +44,6 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
     return driver
 
 
-def _wait_clickable(wait: WebDriverWait, by: By, value: str):
-    return wait.until(EC.element_to_be_clickable((by, value)))
-
-
-def _open_global_search(driver: webdriver.Chrome, wait: WebDriverWait):
-    """
-    Mở Global Search ở top-nav nếu đang đóng, sau đó trả về phần tử ô tìm kiếm.
-    Thử nhiều selector để tránh phụ thuộc UI thay đổi (textarea / input).
-    """
-    # Luôn về khung gốc (top_nav không nằm trong iframe nội dung)
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
-
-    # 1) Nếu textarea/input đã có sẵn thì trả về luôn
-    quick_selectors = [
-        (By.CSS_SELECTOR, "#top_nav textarea"),
-        (By.CSS_SELECTOR, "textarea[placeholder*='Tìm kiếm']"),
-        (By.XPATH, "//textarea[contains(@placeholder,'Tìm kiếm')]"),
-        (By.XPATH, "//input[contains(@placeholder,'Tìm kiếm')]"),
-    ]
-    for by, sel in quick_selectors:
-        els = driver.find_elements(by, sel)
-        if els:
-            return els[0]
-
-    # 2) Thử bấm icon mở Global Search (kính lúp)
-    #   Thử nhiều khả năng tên lớp/aria-label khác nhau
-    openers = [
-        (By.CSS_SELECTOR, "#top_nav .global-search-wrap .icon, #top_nav .global-search-wrap button"),
-        (By.CSS_SELECTOR, "#top_nav [aria-label*='Tìm kiếm']"),
-        (By.CSS_SELECTOR, "#top_nav .global-search-wrap svg"),
-        (By.XPATH, "//*[@id='top_nav']//*[self::button or self::div]//*[name()='svg' or contains(.,'Tìm kiếm')]/ancestor::*[self::button or self::div][1]"),
-    ]
-    clicked = False
-    for by, sel in openers:
-        try:
-            btn = _wait_clickable(wait, by, sel)
-            btn.click()
-            clicked = True
-            break
-        except Exception:
-            continue
-
-    # 3) Một số hệ thống bật Global Search bằng phím tắt ('/' hoặc Ctrl+K)
-    if not clicked:
-        try:
-            body = driver.find_element(By.TAG_NAME, "body")
-            body.send_keys("/")   # thử '/'
-            time.sleep(0.5)
-            body.send_keys(Keys.CONTROL, "k")  # thử Ctrl+K
-            time.sleep(0.5)
-        except Exception:
-            pass
-
-    # 4) Chờ ô tìm kiếm xuất hiện rồi trả về
-    return wait.until(
-        EC.presence_of_element_located((
-            By.XPATH,
-            "//textarea[contains(@placeholder,'Tìm kiếm')] | //input[contains(@placeholder,'Tìm kiếm')]"
-        ))
-    )
-
-
 def run_automation(
     username: str,
     password: str,
@@ -119,8 +55,8 @@ def run_automation(
     Đăng nhập AMIS, tìm record_id, tải file Word và ảnh về.
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
-    driver = _make_driver(download_dir)
-    wait = WebDriverWait(driver, 25)
+    driver = _make_driver(download_dir, headless=headless)
+    wait = WebDriverWait(driver, 40)
 
     try:
         # 1) Login AMIS
@@ -158,38 +94,47 @@ def run_automation(
 
         # Chờ tới khi login thành công (URL chứa amisapp.misa.vn)
         wait.until(EC.url_contains("amisapp.misa.vn"))
-        time.sleep(2)
+        time.sleep(1.5)
 
-        # 2) Vào trang quy trình (execute/1) rồi mở Global Search để tìm record_id
+        # 2) Vào trang quy trình, tìm record_id (ô tìm kiếm là <input> trong trang)
         driver.get("https://amisapp.misa.vn/process/execute/1")
+        wait.until(EC.url_contains("/process/execute"))
 
-        # Đợi top_nav có mặt (đảm bảo header đã render)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav")))
-        time.sleep(0.5)
+        # Một số popover/onboarding có thể che thanh công cụ → đóng nếu có
+        for by, sel in [
+            (By.XPATH, "//button[contains(.,'Để sau') or contains(.,'Bỏ qua') or contains(.,'Đóng')]"),
+            (By.CSS_SELECTOR, "[data-dismiss],[aria-label='Close'],.close"),
+        ]:
+            try:
+                el = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
+                el.click()
+                time.sleep(0.3)
+            except Exception:
+                pass
 
-        search = _open_global_search(driver, wait)
-        # Đảm bảo có thể thao tác
-        try:
-            wait.until(EC.element_to_be_clickable((By.XPATH, "//*[self::textarea or self::input][contains(@placeholder,'Tìm kiếm')]")))
-        except Exception:
-            pass
+        # Chờ đúng ô tìm kiếm trong trang (input với placeholder 'Tìm kiếm')
+        search = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "input[placeholder*='Tìm kiếm']")
+            )
+        )
 
         # Nhập & tìm
         try:
             search.clear()
         except Exception:
-            # một số textarea không hỗ trợ clear(); dùng tổ hợp phím
             search.send_keys(Keys.CONTROL, "a")
             search.send_keys(Keys.BACK_SPACE)
+
         search.send_keys(record_id)
         search.send_keys(Keys.ENTER)
 
-        # Chờ bảng kết quả rồi click vào dòng đầu
+        # Chờ bảng kết quả và click vào dòng đầu tiên
         first_row = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "table tbody tr"))
         )
         first_row.click()
-        time.sleep(1.5)
+        time.sleep(1.0)
 
         # 3) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
         wait.until(
@@ -197,14 +142,14 @@ def run_automation(
                 (By.XPATH, "//span[contains(.,'Xem trước mẫu in')]")
             )
         ).click()
-        time.sleep(1)
+        time.sleep(0.8)
 
         wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH, "//div[contains(.,'Phiếu TTTT - Nhà đất')]")
             )
         ).click()
-        time.sleep(1)
+        time.sleep(0.8)
 
         wait.until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(.,'Tải xuống')]"))
@@ -212,7 +157,7 @@ def run_automation(
 
         template_path = _wait_for_docx(download_dir, timeout=60)
 
-        # 4) Tải ảnh tài sản/rao bán (tùy chỉnh selector khi biết đúng thumbnail)
+        # 4) Tải ảnh tài sản/rao bán (có thể cần chỉnh selector thumbnail tùy UI)
         images = _download_images_from_detail(driver, download_dir)
 
         return template_path, images
@@ -232,7 +177,7 @@ def _wait_for_docx(folder: str, timeout: int = 60) -> str:
 
 def _download_images_from_detail(driver, download_dir: str) -> List[str]:
     """Ví dụ: lấy src của ảnh thumbnail và tải về bằng requests.
-    TODO: thay selector 'img' bằng selector thumbnail cụ thể của AMIS (nếu có).
+    TODO: thay selector 'img' bằng selector thumbnail cụ thể của AMIS nếu cần.
     """
     images: List[str] = []
     thumbs = driver.find_elements(By.CSS_SELECTOR, "img")
