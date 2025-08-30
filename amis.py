@@ -143,46 +143,26 @@ def run_automation(
             pass
         time.sleep(1.0)
 
-        # 3) Tìm ô tìm kiếm theo đúng thao tác click → gõ → Enter
+        # 3) Mở ô tìm kiếm theo đúng thao tác click → gõ → Enter,
+        #    ưu tiên dựa vào #top_nav và activeElement thay vì locator cụ thể.
 
-        CSS_CANDIDATES = [
-            # chính xác theo lớp bạn cung cấp:
-            "textarea.global-search-input",
-            # selector đầy đủ bạn gửi (để bám đúng đường dẫn hiện tại):
-            "#top_nav > div.flex-m.w-full > div.global-search-wrap.active-feature-search > div > "
-            "div.flex-t.global-search.global-search-root > div.p-t-4.p-l-2.p-b-4.w-full > textarea",
-            # fallback thêm:
-            "div.global-search-wrap textarea.global-search-input",
-            "div.global-search-root textarea.global-search-input",
-            "textarea[placeholder*='Tìm kiếm']",
-            "textarea[placeholder*='Search']",
-        ]
-        XPATH_CANDIDATES = [
-            # XPath bạn gửi:
-            "/html/body/div[2]/div/div[2]/div/div[2]/div[3]/div/div[1]/div[3]/textarea",
-            # fallback tổng quát:
-            "//textarea[contains(@class,'global-search-input')]",
-            "//div[contains(@class,'global-search-wrap')]//textarea",
-            "//textarea[contains(@placeholder,'Tìm kiếm')]",
-            "//textarea[contains(@placeholder,'Search')]",
-        ]
-
-        def _try_open_search_ui():
-            # Đảm bảo top header thấy được
+        def _click_search_area_once() -> None:
+            # Cuộn về top để chắc chắn vùng top_nav visible
             try:
                 driver.execute_script("window.scrollTo(0,0);")
             except Exception:
                 pass
 
-            # Click các vùng có thể mở hộp search
-            for by, sel in [
+            # Các vị trí có khả năng mở hộp search
+            click_targets = [
                 (By.CSS_SELECTOR, "#top_nav .global-search-wrap"),
                 (By.CSS_SELECTOR, ".global-search-wrap"),
                 (By.CSS_SELECTOR, "#top_nav [aria-label*='Tìm kiếm']"),
                 (By.CSS_SELECTOR, "#top_nav [title*='Tìm kiếm']"),
                 (By.CSS_SELECTOR, "[aria-label*='Search']"),
                 (By.CSS_SELECTOR, "[title*='Search']"),
-            ]:
+            ]
+            for by, sel in click_targets:
                 try:
                     el = driver.find_element(by, sel)
                     ActionChains(driver).move_to_element(el).pause(0.05).click(el).perform()
@@ -191,11 +171,12 @@ def run_automation(
                 except Exception:
                     continue
 
-            # Gửi phím tắt phổ biến để bật search
+        def _try_keyboard_shortcuts() -> None:
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
+                # nhiều app bật search bằng '/', Ctrl+K, Ctrl+F
                 for combo in [
-                    ("/",),  # nhiều app bật search bằng '/'
+                    ("/",),
                     (Keys.CONTROL, "k"),
                     (Keys.CONTROL, "f"),
                 ]:
@@ -210,71 +191,113 @@ def run_automation(
             except Exception:
                 pass
 
-        def _find_here() -> object | None:
-            # thử CSS trước
-            for sel in CSS_CANDIDATES:
-                try:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                    if el.is_displayed() and el.is_enabled():
-                        return el
-                except Exception:
-                    pass
-            # thử XPath
-            for xp in XPATH_CANDIDATES:
-                try:
-                    el = driver.find_element(By.XPATH, xp)
-                    if el.is_displayed() and el.is_enabled():
-                        return el
-                except Exception:
-                    pass
-            return None
+        def _is_typable(el) -> bool:
+            try:
+                tag = el.tag_name.lower()
+            except Exception:
+                return False
+            if tag in ("textarea", "input"):
+                return el.is_enabled() and el.is_displayed()
+            # contenteditable
+            try:
+                ce = el.get_attribute("contenteditable")
+                if ce and ce.lower() == "true":
+                    return el.is_displayed()
+            except Exception:
+                pass
+            return False
 
-        def _find_in_frames(max_depth: int = 6) -> object | None:
-            """DFS mọi iframe; tại mỗi ngữ cảnh: mở UI và tìm ô search."""
-            _try_open_search_ui()
-            found = _find_here()
-            if found:
-                return found
-
-            if max_depth <= 0:
+        def _focus_typable_via_js():
+            # Tìm phần tử gõ được bằng JS và focus (kể cả trong iframe same-origin)
+            js = """
+return (function(){
+  function isVisible(el){
+    if (!el) return false;
+    const st = getComputedStyle(el);
+    if (!st) return false;
+    if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    return true;
+  }
+  function findTypable(doc){
+    try{
+      const qs = [
+        'textarea.global-search-input',
+        'textarea[placeholder*="Tìm kiếm"]',
+        'textarea[placeholder*="Search"]',
+        'input.global-search-input',
+        'input[type="search"]',
+        '[contenteditable="true"]'
+      ];
+      for (const sel of qs){
+        const list = doc.querySelectorAll(sel);
+        for (const el of list){
+          if (isVisible(el)) return el;
+        }
+      }
+    }catch(e){}
+    return null;
+  }
+  function crawl(win, depth){
+    if (depth > 4) return null;
+    const el = findTypable(win.document);
+    if (el){ el.focus(); return el; }
+    const ifrs = win.document.querySelectorAll('iframe');
+    for (const f of ifrs){
+      try{
+        const child = f.contentWindow;
+        const got = crawl(child, depth+1);
+        if (got) return got;
+      }catch(e){}
+    }
+    return null;
+  }
+  return crawl(window, 0);
+})();
+"""
+            try:
+                return driver.execute_script(js)
+            except Exception:
                 return None
 
-            frames = driver.find_elements(By.TAG_NAME, "iframe")
-            for f in frames:
-                try:
-                    driver.switch_to.frame(f)
-                    sub = _find_in_frames(max_depth - 1)
-                    if sub:
-                        return sub
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        driver.switch_to.parent_frame()
-                    except Exception:
-                        try:
-                            driver.switch_to.default_content()
-                        except Exception:
-                            pass
-            return None
+        def _get_active() :
+            try:
+                return driver.switch_to.active_element
+            except Exception:
+                return None
 
-        def _find_search_el(timeout_s=55):
+        def _obtain_search_focus(timeout_s=55):
             end = time.time() + timeout_s
             while time.time() < end:
-                # luôn về root trước khi quét
+                # 1) click vùng search
+                _click_search_area_once()
+                # 2) thử lấy activeElement
+                el = _get_active()
+                if el and _is_typable(el):
+                    return el
+                # 3) thử JS tìm phần tử có thể gõ
+                el = _focus_typable_via_js()
+                if el and _is_typable(el):
+                    return el
+                # 4) thử phím tắt
+                _try_keyboard_shortcuts()
+                el = _get_active()
+                if el and _is_typable(el):
+                    return el
+                # 5) Tab một cái để nhảy vào input nếu đang trong overlay
                 try:
-                    driver.switch_to.default_content()
+                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.TAB)
+                    time.sleep(0.08)
+                    el = _get_active()
+                    if el and _is_typable(el):
+                        return el
                 except Exception:
                     pass
-
-                el = _find_in_frames(max_depth=6)
-                if el:
-                    return el
-
-                time.sleep(0.3)
+                time.sleep(0.25)
             return None
 
-        search_el = _find_search_el(timeout_s=55)
+        search_el = _obtain_search_focus(timeout_s=55)
 
         if not search_el:
             _dump_debug(driver, download_dir, "no_global_search")
@@ -300,15 +323,13 @@ def run_automation(
             # Fallback JS nếu send_keys không hoạt động
             driver.execute_script("""
                 const el = arguments[0], val = arguments[1];
-                el.focus();
-                try { el.select && el.select(); } catch(e){}
-                if (el && el.tagName) {
-                  const tag = el.tagName.toLowerCase();
-                  if (tag === 'textarea' || tag === 'input') {
-                    el.value = val;
-                  } else {
-                    el.textContent = val;
-                  }
+                if (!el) return;
+                el.focus && el.focus();
+                const tag = (el.tagName||'').toLowerCase();
+                if (tag === 'textarea' || tag === 'input') {
+                  el.value = val;
+                } else {
+                  el.textContent = val;
                 }
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
