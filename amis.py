@@ -11,7 +11,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.common.keys import Keys  # dùng cho send_keys
+from selenium.webdriver.common.keys import Keys
 
 from docx import Document
 from docx.shared import Inches
@@ -24,13 +24,11 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
-    # Các flag an toàn phổ biến cho môi trường container/Cloud:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1440,900")
-    # Nếu chắc chắn chromium ở path cụ thể thì mở dòng dưới (Cloud thường KHÔNG cần):
-    # opts.binary_location = "/usr/bin/chromium"
+    # opts.binary_location = "/usr/bin/chromium"  # nếu cần
 
     prefs = {
         "download.default_directory": download_dir,
@@ -44,59 +42,35 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     return drv
 
 
-# ===================== Small helpers (iframe + debug) =====================
-
-def _switch_to_possible_iframes(driver) -> bool:
-    """Thử chuyển vào các iframe thường gặp; True nếu đã chuyển thành công."""
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
-
-    # Thử theo id/name phổ biến
-    candidates = ["app-iframe", "main-iframe", "content-iframe", "amis-iframe"]
-    for c in candidates:
-        for by in (By.ID, By.NAME):
-            try:
-                iframe = WebDriverWait(driver, 2).until(
-                    EC.presence_of_element_located((by, c))
-                )
-                driver.switch_to.frame(iframe)
-                return True
-            except Exception:
-                pass
-
-    # Nếu không có id/name, thử iframe đầu tiên có input/textarea
-    try:
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for f in iframes:
-            try:
-                driver.switch_to.default_content()
-                driver.switch_to.frame(f)
-                if driver.find_elements(By.CSS_SELECTOR, "input,textarea"):
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Không tìm thấy iframe phù hợp -> về khung gốc
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
-    return False
-
+# ===================== Debug helpers =====================
 
 def _dump_debug(driver, out_dir: str, tag: str) -> None:
-    """Lưu screenshot + HTML để debug khi fail."""
+    """Lưu screenshot + HTML để debug khi fail, kèm info frame hiện tại."""
     try:
         os.makedirs(out_dir, exist_ok=True)
         png = os.path.join(out_dir, f"debug_{tag}.png")
         html = os.path.join(out_dir, f"debug_{tag}.html")
+        info = os.path.join(out_dir, f"debug_{tag}_info.txt")
+
         driver.save_screenshot(png)
         with open(html, "w", encoding="utf-8") as f:
             f.write(driver.page_source)
+
+        with open(info, "w", encoding="utf-8") as f:
+            try:
+                url = driver.execute_script("return document.location.href;")
+            except Exception:
+                url = "(cannot read document.location.href)"
+            try:
+                title = driver.title
+            except Exception:
+                title = "(no title)"
+            f.write(f"URL: {url}\nTITLE: {title}\n")
+            try:
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                f.write(f"IFRAMES count: {len(iframes)}\n")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -116,7 +90,7 @@ def run_automation(
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
     driver = _make_driver(download_dir, headless=headless)
-    wait = WebDriverWait(driver, 60)  # tăng timeout tổng thể
+    wait = WebDriverWait(driver, 60)
 
     try:
         # 1) Login
@@ -125,7 +99,7 @@ def run_automation(
         user_el = wait.until(EC.presence_of_element_located((
             By.CSS_SELECTOR,
             "#box-login-right .login-form-inputs .username-wrap input",
-        )))  # đảm bảo đúng số lượng ')'
+        )))
         user_el.send_keys(username)
 
         pw_el = driver.find_element(
@@ -157,82 +131,123 @@ def run_automation(
 
         # 2) Mở trang Quy trình (Lượt chạy)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        time.sleep(1.2)
-
-        # (khuyến nghị) đảm bảo đúng tab "Lượt chạy"
+        # chờ top nav có mặt (UI chính đã tải)
         try:
-            tab_runs = WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.XPATH, "//a[contains(.,'Lượt chạy')]"))
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav"))
             )
-            driver.execute_script("arguments[0].click();", tab_runs)
-            time.sleep(0.5)
         except Exception:
             pass
+        time.sleep(1.0)
 
         # 3) Tìm ô tìm kiếm theo HTML bạn cung cấp (CSS/XPath) + mở UI nếu cần
+
+        CSS_CANDIDATES = [
+            # chính xác theo lớp bạn cung cấp:
+            "textarea.global-search-input",
+            # selector đầy đủ bạn gửi (để bám đúng đường dẫn hiện tại):
+            "#top_nav > div.flex-m.w-full > div.global-search-wrap.active-feature-search > div > "
+            "div.flex-t.global-search.global-search-root > div.p-t-4.p-l-2.p-b-4.w-full > textarea",
+            # fallback thêm:
+            "div.global-search-wrap textarea.global-search-input",
+            "div.global-search-root textarea.global-search-input",
+        ]
+        XPATH_CANDIDATES = [
+            # XPath bạn gửi:
+            "/html/body/div[2]/div/div[2]/div/div[2]/div[3]/div/div[1]/div[3]/textarea",
+            # fallback tổng quát:
+            "//textarea[contains(@class,'global-search-input')]",
+            "//div[contains(@class,'global-search-wrap')]//textarea",
+        ]
+
         def _open_global_search_ui():
             # Click vùng Global Search nếu có
             for by, sel in [
                 (By.CSS_SELECTOR, "#top_nav .global-search-wrap"),
                 (By.CSS_SELECTOR, ".global-search-wrap"),
+                (By.CSS_SELECTOR, "#top_nav [aria-label*='Tìm kiếm']"),
+                (By.CSS_SELECTOR, "#top_nav [title*='Tìm kiếm']"),
             ]:
                 try:
                     btn = driver.find_element(by, sel)
                     driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(0.2)
+                    time.sleep(0.15)
                     break
                 except Exception:
                     continue
-            # Thử chuyển iframe có thể chứa search
-            _switch_to_possible_iframes(driver)
             # Thử phím tắt phổ biến
             try:
                 driver.find_element(By.TAG_NAME, "body").send_keys("/")
-                time.sleep(0.15)
+                time.sleep(0.1)
             except Exception:
                 pass
 
-        def _find_search_el(timeout_s=45):
-            end = time.time() + timeout_s
-            css_list = [
-                # Chính xác theo lớp bạn cung cấp:
-                "textarea.global-search-input",
-                # Selector đầy đủ bạn gửi:
-                "#top_nav > div.flex-m.w-full > div.global-search-wrap.active-feature-search > div > div.flex-t.global-search.global-search-root > div.p-t-4.p-l-2.p-b-4.w-full > textarea",
-            ]
-            xpath_list = [
-                # XPath bạn gửi:
-                "/html/body/div[2]/div/div[2]/div/div[2]/div[3]/div/div[1]/div[3]/textarea",
-                # Fallback tổng quát:
-                "//textarea[contains(@class,'global-search-input')]",
-                "//div[contains(@class,'global-search-wrap')]//textarea",
-            ]
-
-            while time.time() < end:
-                _open_global_search_ui()
-
-                # thử CSS trước
-                for sel in css_list:
-                    try:
-                        el = driver.find_element(By.CSS_SELECTOR, sel)
-                        if el.is_displayed() and el.is_enabled():
-                            return el
-                    except Exception:
-                        pass
-
-                # thử XPath
-                for xp in xpath_list:
-                    try:
-                        el = driver.find_element(By.XPATH, xp)
-                        if el.is_displayed() and el.is_enabled():
-                            return el
-                    except Exception:
-                        pass
-
-                time.sleep(0.25)
+        def _search_here_for_input():
+            # thử CSS trước
+            for sel in CSS_CANDIDATES:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed() and el.is_enabled():
+                        return el
+                except Exception:
+                    pass
+            # thử XPath
+            for xp in XPATH_CANDIDATES:
+                try:
+                    el = driver.find_element(By.XPATH, xp)
+                    if el.is_displayed() and el.is_enabled():
+                        return el
+                except Exception:
+                    pass
             return None
 
-        search_el = _find_search_el(timeout_s=45)
+        def _find_in_frames_recursive(max_depth: int = 3):
+            """Tìm textarea ở frame hiện tại và mọi iframe con (DFS)."""
+            # thử mở UI trước rồi tìm
+            _open_global_search_ui()
+            found = _search_here_for_input()
+            if found:
+                return found
+
+            if max_depth <= 0:
+                return None
+
+            frames = driver.find_elements(By.TAG_NAME, "iframe")
+            for f in frames:
+                try:
+                    driver.switch_to.frame(f)
+                    sub = _find_in_frames_recursive(max_depth - 1)
+                    if sub:
+                        return sub
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        driver.switch_to.parent_frame()
+                    except Exception:
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+            return None
+
+        def _find_search_el(timeout_s=50):
+            end = time.time() + timeout_s
+            while time.time() < end:
+                # luôn về root trước khi quét
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+
+                el = _find_in_frames_recursive(max_depth=3)
+                if el:
+                    return el
+
+                time.sleep(0.3)
+            return None
+
+        search_el = _find_search_el(timeout_s=50)
 
         if not search_el:
             _dump_debug(driver, download_dir, "no_global_search")
@@ -241,14 +256,12 @@ def run_automation(
                 "Đã lưu debug screenshot/HTML trong thư mục download."
             )
 
-        # 4) Bơm record_id & nhấn Enter (dùng send_keys, ổn định hơn JS)
+        # 4) Bơm record_id & nhấn Enter (ưu tiên send_keys; fallback JS)
         try:
-            # focus + xóa sẵn nếu có text
             driver.execute_script("arguments[0].focus();", search_el)
             try:
                 search_el.clear()
             except Exception:
-                # textarea đôi khi không clear được => bôi đen & xóa
                 search_el.send_keys(Keys.CONTROL, "a")
                 search_el.send_keys(Keys.BACKSPACE)
 
@@ -256,7 +269,6 @@ def run_automation(
             time.sleep(0.1)
             search_el.send_keys(Keys.ENTER)
         except Exception:
-            # fallback JS nếu send_keys lỗi
             driver.execute_script("""
                 const el = arguments[0], val = arguments[1];
                 el.focus();
