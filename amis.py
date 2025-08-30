@@ -124,7 +124,7 @@ def run_automation(
         user_el = wait.until(EC.presence_of_element_located((
             By.CSS_SELECTOR,
             "#box-login-right .login-form-inputs .username-wrap input",
-        ))))
+        )))  # <-- sửa còn 3 dấu ')' thay vì 4
         user_el.send_keys(username)
 
         pw_el = driver.find_element(
@@ -190,6 +190,7 @@ def run_automation(
             ]
 
             def _visible_query(sel: str) -> str:
+                # f-string với JS: đã dùng {{ }} để thoát ngoặc nhọn
                 return f"""
 return (function(){{
   const el = document.querySelector("{sel}");
