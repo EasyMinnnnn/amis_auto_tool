@@ -24,11 +24,13 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
+    # Các flag an toàn cho môi trường Cloud/Container:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1440,900")
-    # opts.binary_location = "/usr/bin/chromium"  # nếu cần
+    # Nếu cần chỉ định binary:
+    # opts.binary_location = "/usr/bin/chromium"
 
     prefs = {
         "download.default_directory": download_dir,
@@ -45,7 +47,7 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
 # ===================== Debug helpers =====================
 
 def _dump_debug(driver, out_dir: str, tag: str) -> None:
-    """Lưu screenshot + HTML để debug khi fail, kèm info frame hiện tại."""
+    """Lưu screenshot + HTML + info frame để debug khi fail."""
     try:
         os.makedirs(out_dir, exist_ok=True)
         png = os.path.join(out_dir, f"debug_{tag}.png")
@@ -131,7 +133,7 @@ def run_automation(
 
         # 2) Mở trang Quy trình (Lượt chạy)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        # chờ top nav có mặt (UI chính đã tải)
+        # chờ top nav xuất hiện (UI chính đã sẵn sàng)
         try:
             WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav"))
@@ -140,28 +142,51 @@ def run_automation(
             pass
         time.sleep(1.0)
 
-        # 3) Tìm ô tìm kiếm theo HTML bạn cung cấp (CSS/XPath) + mở UI nếu cần
+        # 3) Tìm ô tìm kiếm giống thao tác trong video (click -> gõ -> Enter)
 
-        CSS_CANDIDATES = [
-            # chính xác theo lớp bạn cung cấp:
-            "textarea.global-search-input",
-            # selector đầy đủ bạn gửi (để bám đúng đường dẫn hiện tại):
-            "#top_nav > div.flex-m.w-full > div.global-search-wrap.active-feature-search > div > "
-            "div.flex-t.global-search.global-search-root > div.p-t-4.p-l-2.p-b-4.w-full > textarea",
-            # fallback thêm:
-            "div.global-search-wrap textarea.global-search-input",
-            "div.global-search-root textarea.global-search-input",
-        ]
-        XPATH_CANDIDATES = [
-            # XPath bạn gửi:
-            "/html/body/div[2]/div/div[2]/div/div[2]/div[3]/div/div[1]/div[3]/textarea",
-            # fallback tổng quát:
-            "//textarea[contains(@class,'global-search-input')]",
-            "//div[contains(@class,'global-search-wrap')]//textarea",
-        ]
+        # JS: quét toàn bộ document + các iframe cùng origin để tìm ô search visible
+        JS_FIND_VISIBLE_SEARCH = """
+return (function(){
+  function isVisible(el){
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    return true;
+  }
+  function firstVisibleInDoc(doc){
+    try{
+      const list = Array.from(doc.querySelectorAll(
+        'textarea.global-search-input,textarea[placeholder*=\"Tìm kiếm\"],textarea[placeholder*=\"Search\"],[contenteditable=\"true\"]'
+      ));
+      for (const el of list){
+        if (isVisible(el)) return el;
+      }
+    }catch(e){}
+    return null;
+  }
+  function crawl(win, depth){
+    if (depth > 3) return null;
+    const el = firstVisibleInDoc(win.document);
+    if (el) return el;
+    const iframes = win.document.querySelectorAll('iframe');
+    for (const f of iframes){
+      try{
+        const child = f.contentWindow;
+        const found = crawl(child, depth+1);
+        if (found) return found;
+      }catch(e){}
+    }
+    return null;
+  }
+  return crawl(window, 0);
+})();
+"""
 
         def _open_global_search_ui():
-            # Click vùng Global Search nếu có
+            # Click vùng/global search wrapper nếu có
             for by, sel in [
                 (By.CSS_SELECTOR, "#top_nav .global-search-wrap"),
                 (By.CSS_SELECTOR, ".global-search-wrap"),
@@ -182,72 +207,20 @@ def run_automation(
             except Exception:
                 pass
 
-        def _search_here_for_input():
-            # thử CSS trước
-            for sel in CSS_CANDIDATES:
-                try:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                    if el.is_displayed() and el.is_enabled():
-                        return el
-                except Exception:
-                    pass
-            # thử XPath
-            for xp in XPATH_CANDIDATES:
-                try:
-                    el = driver.find_element(By.XPATH, xp)
-                    if el.is_displayed() and el.is_enabled():
-                        return el
-                except Exception:
-                    pass
-            return None
-
-        def _find_in_frames_recursive(max_depth: int = 3):
-            """Tìm textarea ở frame hiện tại và mọi iframe con (DFS)."""
-            # thử mở UI trước rồi tìm
-            _open_global_search_ui()
-            found = _search_here_for_input()
-            if found:
-                return found
-
-            if max_depth <= 0:
-                return None
-
-            frames = driver.find_elements(By.TAG_NAME, "iframe")
-            for f in frames:
-                try:
-                    driver.switch_to.frame(f)
-                    sub = _find_in_frames_recursive(max_depth - 1)
-                    if sub:
-                        return sub
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        driver.switch_to.parent_frame()
-                    except Exception:
-                        try:
-                            driver.switch_to.default_content()
-                        except Exception:
-                            pass
-            return None
-
-        def _find_search_el(timeout_s=50):
+        def _find_search_el(timeout_s=55):
             end = time.time() + timeout_s
             while time.time() < end:
-                # luôn về root trước khi quét
+                _open_global_search_ui()
                 try:
-                    driver.switch_to.default_content()
+                    el = driver.execute_script(JS_FIND_VISIBLE_SEARCH)
+                    if el:
+                        return el
                 except Exception:
                     pass
-
-                el = _find_in_frames_recursive(max_depth=3)
-                if el:
-                    return el
-
-                time.sleep(0.3)
+                time.sleep(0.25)
             return None
 
-        search_el = _find_search_el(timeout_s=50)
+        search_el = _find_search_el(timeout_s=55)
 
         if not search_el:
             _dump_debug(driver, download_dir, "no_global_search")
@@ -258,7 +231,9 @@ def run_automation(
 
         # 4) Bơm record_id & nhấn Enter (ưu tiên send_keys; fallback JS)
         try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", search_el)
             driver.execute_script("arguments[0].focus();", search_el)
+            # clear nội dung cũ (textarea đôi khi không clear được => Ctrl+A Backspace)
             try:
                 search_el.clear()
             except Exception:
@@ -269,11 +244,16 @@ def run_automation(
             time.sleep(0.1)
             search_el.send_keys(Keys.ENTER)
         except Exception:
+            # Fallback JS nếu send_keys không hoạt động
             driver.execute_script("""
                 const el = arguments[0], val = arguments[1];
                 el.focus();
                 try { el.select && el.select(); } catch(e){}
-                el.value = val;
+                if (el.tagName && (el.tagName.toLowerCase()==='textarea'||el.tagName.toLowerCase()==='input')) {
+                  el.value = val;
+                } else {
+                  el.textContent = val;
+                }
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
                 el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubbles:true}));
