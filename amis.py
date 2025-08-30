@@ -11,6 +11,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.keys import Keys  # dùng cho send_keys
 
 from docx import Document
 from docx.shared import Inches
@@ -115,7 +116,7 @@ def run_automation(
     Trả về: (đường dẫn file Word, danh sách ảnh).
     """
     driver = _make_driver(download_dir, headless=headless)
-    wait = WebDriverWait(driver, 45)
+    wait = WebDriverWait(driver, 60)  # tăng timeout tổng thể
 
     try:
         # 1) Login
@@ -124,7 +125,7 @@ def run_automation(
         user_el = wait.until(EC.presence_of_element_located((
             By.CSS_SELECTOR,
             "#box-login-right .login-form-inputs .username-wrap input",
-        )))  # <-- sửa còn 3 dấu ')' thay vì 4
+        )))  # đảm bảo đúng số lượng ')'
         user_el.send_keys(username)
 
         pw_el = driver.find_element(
@@ -156,7 +157,7 @@ def run_automation(
 
         # 2) Mở trang Quy trình (Lượt chạy)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        time.sleep(1.0)
+        time.sleep(1.2)
 
         # (khuyến nghị) đảm bảo đúng tab "Lượt chạy"
         try:
@@ -168,62 +169,70 @@ def run_automation(
         except Exception:
             pass
 
-        # 3) Tìm ô tìm kiếm bằng POLL JS (robust, hỗ trợ iframe + nhiều selector)
-        def _poll_search_el(timeout_s=40):
-            end = time.time() + timeout_s
+        # 3) Tìm ô tìm kiếm theo HTML bạn cung cấp (CSS/XPath) + mở UI nếu cần
+        def _open_global_search_ui():
+            # Click vùng Global Search nếu có
+            for by, sel in [
+                (By.CSS_SELECTOR, "#top_nav .global-search-wrap"),
+                (By.CSS_SELECTOR, ".global-search-wrap"),
+            ]:
+                try:
+                    btn = driver.find_element(by, sel)
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(0.2)
+                    break
+                except Exception:
+                    continue
+            # Thử chuyển iframe có thể chứa search
+            _switch_to_possible_iframes(driver)
+            # Thử phím tắt phổ biến
+            try:
+                driver.find_element(By.TAG_NAME, "body").send_keys("/")
+                time.sleep(0.15)
+            except Exception:
+                pass
 
-            selectors = [
-                # class “global-search-input”
+        def _find_search_el(timeout_s=45):
+            end = time.time() + timeout_s
+            css_list = [
+                # Chính xác theo lớp bạn cung cấp:
                 "textarea.global-search-input",
-                "input.global-search-input",
-                # placeholder tiếng Việt (thường gặp)
-                "textarea[placeholder*='Tìm kiếm']",              # generic
-                "input[placeholder*='Tìm kiếm']",
-                "input[placeholder*='Tìm kiếm thông minh']",      # cụ thể hơn
-                # aria-label
-                "[aria-label*='Tìm kiếm']",
-                # ARIA roles/common search boxes
-                "input[type='search']",
-                "[role='search'] input",
-                # Fallback: bất kỳ input/textarea có placeholder, còn hiển thị
-                "input[placeholder], textarea[placeholder]",
+                # Selector đầy đủ bạn gửi:
+                "#top_nav > div.flex-m.w-full > div.global-search-wrap.active-feature-search > div > div.flex-t.global-search.global-search-root > div.p-t-4.p-l-2.p-b-4.w-full > textarea",
+            ]
+            xpath_list = [
+                # XPath bạn gửi:
+                "/html/body/div[2]/div/div[2]/div/div[2]/div[3]/div/div[1]/div[3]/textarea",
+                # Fallback tổng quát:
+                "//textarea[contains(@class,'global-search-input')]",
+                "//div[contains(@class,'global-search-wrap')]//textarea",
             ]
 
-            def _visible_query(sel: str) -> str:
-                # f-string với JS: đã dùng {{ }} để thoát ngoặc nhọn
-                return f"""
-return (function(){{
-  const el = document.querySelector("{sel}");
-  if (!el) return null;
-  const style = window.getComputedStyle(el);
-  const visible = style && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
-  return visible ? el : null;
-}})();
-"""
-
             while time.time() < end:
-                _switch_to_possible_iframes(driver)
+                _open_global_search_ui()
 
-                # thử phím tắt "/" để bật ô search nếu UI hỗ trợ
-                try:
-                    body = driver.find_element(By.TAG_NAME, "body")
-                    body.send_keys("/")
-                except Exception:
-                    pass
-
-                for sel in selectors:
+                # thử CSS trước
+                for sel in css_list:
                     try:
-                        el = driver.execute_script(_visible_query(sel))
-                        if el:
+                        el = driver.find_element(By.CSS_SELECTOR, sel)
+                        if el.is_displayed() and el.is_enabled():
                             return el
                     except Exception:
                         pass
 
-                time.sleep(0.6)
+                # thử XPath
+                for xp in xpath_list:
+                    try:
+                        el = driver.find_element(By.XPATH, xp)
+                        if el.is_displayed() and el.is_enabled():
+                            return el
+                    except Exception:
+                        pass
 
+                time.sleep(0.25)
             return None
 
-        search_el = _poll_search_el(timeout_s=40)
+        search_el = _find_search_el(timeout_s=45)
 
         if not search_el:
             _dump_debug(driver, download_dir, "no_global_search")
@@ -232,17 +241,31 @@ return (function(){{
                 "Đã lưu debug screenshot/HTML trong thư mục download."
             )
 
-        # 4) Bơm record_id & nhấn Enter bằng JS
-        driver.execute_script("""
-const el = arguments[0];
-const val = arguments[1];
-el.focus();
-try { el.select && el.select(); } catch(e){}
-el.value = val;
-el.dispatchEvent(new Event('input', {bubbles:true}));
-el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
-el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubbles:true}));
-""", search_el, record_id)
+        # 4) Bơm record_id & nhấn Enter (dùng send_keys, ổn định hơn JS)
+        try:
+            # focus + xóa sẵn nếu có text
+            driver.execute_script("arguments[0].focus();", search_el)
+            try:
+                search_el.clear()
+            except Exception:
+                # textarea đôi khi không clear được => bôi đen & xóa
+                search_el.send_keys(Keys.CONTROL, "a")
+                search_el.send_keys(Keys.BACKSPACE)
+
+            search_el.send_keys(str(record_id))
+            time.sleep(0.1)
+            search_el.send_keys(Keys.ENTER)
+        except Exception:
+            # fallback JS nếu send_keys lỗi
+            driver.execute_script("""
+                const el = arguments[0], val = arguments[1];
+                el.focus();
+                try { el.select && el.select(); } catch(e){}
+                el.value = val;
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
+                el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubbles:true}));
+            """, search_el, str(record_id))
 
         # 5) Chờ panel kết quả và click đúng ID
         try:
