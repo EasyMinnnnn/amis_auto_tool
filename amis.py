@@ -1,9 +1,17 @@
-"""Helper module for AMIS automation and document manipulation."""
+"""Helper module for AMIS automation and document manipulation.
+
+Bản này bỏ hẳn bước *tìm kiếm UI*:
+- Nếu có `execution_id`: vào thẳng trang chi tiết bằng URL.
+- Nếu chỉ có `record_id`: gọi API GlobalSearch để đổi sang `execution_id` (dùng cookie sau đăng nhập).
+Sau đó tự động mở **Xem trước mẫu in → Phiếu TTTT - Nhà đất → Tải xuống** với logic click
+được làm robust hơn (thử nhiều selector và quét qua iframe nếu có).
+"""
 
 import os
 import time
 from typing import List, Tuple, Optional
 import requests
+import re
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -27,7 +35,7 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1440,900")
-    # opts.binary_location = "/usr/bin/chromium"  # nếu cần
+    # opts.binary_location = "/usr/bin/chromium"  # nếu môi trường yêu cầu
 
     prefs = {
         "download.default_directory": download_dir,
@@ -54,7 +62,7 @@ def _dump_debug(driver, out_dir: str, tag: str) -> None:
         pass
 
 
-# ===================== API helpers (bỏ UI search) =====================
+# ===================== Requests session từ Selenium =====================
 
 def _requests_session_from_driver(driver) -> requests.Session:
     """
@@ -62,13 +70,11 @@ def _requests_session_from_driver(driver) -> requests.Session:
     để gọi API nội bộ (GlobalSearch/Export...).
     """
     s = requests.Session()
-    # copy cookie từ webdriver sang requests
     for c in driver.get_cookies():
         try:
             s.cookies.set(c["name"], c["value"], domain=c.get("domain"), path=c.get("path", "/"))
         except Exception:
             pass
-    # header cơ bản
     s.headers.update({
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
@@ -78,6 +84,8 @@ def _requests_session_from_driver(driver) -> requests.Session:
     })
     return s
 
+
+# ===================== GlobalSearch: record_id -> execution_id =====================
 
 def _resolve_execution_id_via_api(
     session: requests.Session,
@@ -93,14 +101,12 @@ def _resolve_execution_id_via_api(
     url = f"{base}/process/APIS/g2/ProcessAPI/api/AvaBot/GlobalSearch"
     params = {"pageSize": 3, "pageIndex": 0, "dateQuery": ""}
 
-    # Mỗi tenant có thể khác tên field keyword; thử lần lượt các key phổ biến.
     candidate_bodies = [
         {"Keyword": str(record_id), "companyCode": tenant_code},
         {"keyword": str(record_id), "companyCode": tenant_code},
         {"Text":    str(record_id), "companyCode": tenant_code},
         {"SearchText": str(record_id), "companyCode": tenant_code},
-        # Nếu tenant không yêu cầu companyCode trong body, thử không gửi:
-        {"Keyword": str(record_id)},
+        {"Keyword": str(record_id)},  # fallback nếu body không cần companyCode
     ]
 
     last_err = None
@@ -127,6 +133,82 @@ def _resolve_execution_id_via_api(
     )
 
 
+# ===================== Helpers: tìm/click robust, quét iframe =====================
+
+def _all_frames(driver):
+    """Danh sách tất cả frame (None = default)."""
+    frames = [None]
+    try:
+        ifrs = driver.find_elements(By.TAG_NAME, "iframe")
+        frames.extend(ifrs)
+    except Exception:
+        pass
+    return frames
+
+
+def _with_each_frame(driver, func):
+    """Chạy func trong default_content và từng iframe; trả về (element, frame) đầu tiên tìm thấy."""
+    for fr in _all_frames(driver):
+        try:
+            driver.switch_to.default_content()
+            if fr is not None:
+                driver.switch_to.frame(fr)
+            el = func()
+            if el:
+                return el, fr
+        except Exception:
+            continue
+    driver.switch_to.default_content()
+    return None, None
+
+
+def _find_clickable_by_xpaths(driver, xpaths: List[str], timeout: int = 15):
+    def finder():
+        for xp in xpaths:
+            try:
+                el = WebDriverWait(driver, 2).until(
+                    EC.element_to_be_clickable((By.XPATH, xp))
+                )
+                return el
+            except Exception:
+                pass
+        return None
+
+    end = time.time() + timeout
+    while time.time() < end:
+        el, fr = _with_each_frame(driver, finder)
+        if el:
+            return el, fr
+        time.sleep(0.3)
+    return None, None
+
+
+def _click_text(driver, texts: List[str], timeout: int = 20) -> bool:
+    """Click vào phần tử có text khớp (thử nhiều biến thể) – quét qua mọi iframe."""
+    xpaths = []
+    for t in texts:
+        # Tối ưu hóa normalize-space và contains (xử lý biến thể font/span)
+        xpaths.extend([
+            f"//button[normalize-space()='{t}']",
+            f"//span[normalize-space()='{t}']/ancestor::button",
+            f"//span[contains(normalize-space(),'{t}')]/ancestor::button",
+            f"//*[self::button or self::a or self::span or self::div][contains(normalize-space(),'{t}')]",
+        ])
+    el, fr = _find_clickable_by_xpaths(driver, xpaths, timeout=timeout)
+    if not el:
+        return False
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        driver.execute_script("arguments[0].click();", el)
+        return True
+    except Exception:
+        try:
+            el.click()
+            return True
+        except Exception:
+            return False
+
+
 # ===================== MAIN =====================
 
 def run_automation(
@@ -134,7 +216,7 @@ def run_automation(
     password: str,
     download_dir: str,
     headless: bool = True,
-    record_id: Optional[str] = None,       # bạn có thể chỉ nhập Record ID
+    record_id: Optional[str] = None,       # chỉ nhập Record ID cũng được
     execution_id: Optional[str] = None,    # hoặc đưa thẳng execution ID (ID=... trong URL)
     status: Optional[int] = None,          # nếu không có, sẽ lấy từ API search (khi dùng record_id)
     company_code: str = "RH7VZQAQ",
@@ -148,7 +230,7 @@ def run_automation(
         raise ValueError("Cần truyền execution_id hoặc record_id.")
 
     driver = _make_driver(download_dir, headless=headless)
-    wait = WebDriverWait(driver, 60)
+    wait = WebDriverWait(driver, 90)
 
     try:
         # 1) Login
@@ -206,28 +288,39 @@ def run_automation(
         )
         driver.get(detail_url)
         try:
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav"))
             )
         except Exception:
             pass
-
-        # 4) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
-        wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//span[contains(.,'Xem trước mẫu in')]"
-        ))).click()
         time.sleep(0.8)
 
-        wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//div[contains(.,'Phiếu TTTT - Nhà đất')]"
-        ))).click()
+        # 4) Xem trước mẫu in -> chọn Phiếu TTTT - Nhà đất -> Tải xuống
+        #    (click robust: thử nhiều selector / iframe)
+        # 4.1 Click "Xem trước mẫu in"
+        if not _click_text(driver, ["Xem trước mẫu in", "Xem trước", "Mẫu in"], timeout=25):
+            _dump_debug(driver, download_dir, "cannot_click_preview")
+            raise TimeoutException("Không tìm thấy/không click được nút 'Xem trước mẫu in'.")
+
+        time.sleep(0.8)
+
+        # 4.2 Chọn "Phiếu TTTT - Nhà đất"
+        if not _click_text(
+            driver,
+            ["Phiếu TTTT - Nhà đất", "TTTT - Nhà đất", "Phiếu TTTT"],
+            timeout=25,
+        ):
+            _dump_debug(driver, download_dir, "cannot_pick_template")
+            raise TimeoutException("Không chọn được mẫu 'Phiếu TTTT - Nhà đất'.")
+
         time.sleep(0.6)
 
-        wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[contains(.,'Tải xuống')]"
-        ))).click()
+        # 4.3 Click "Tải xuống"
+        if not _click_text(driver, ["Tải xuống", "Tải về"], timeout=25):
+            _dump_debug(driver, download_dir, "cannot_click_download")
+            raise TimeoutException("Không click được nút 'Tải xuống'.")
 
-        template_path = _wait_for_docx(download_dir, timeout=90)
+        template_path = _wait_for_docx(download_dir, timeout=120)
 
         # 5) Tải một số ảnh hiển thị trên trang chi tiết (best-effort)
         images = _download_images_from_detail(driver, download_dir)
@@ -240,7 +333,7 @@ def run_automation(
 
 # ===================== Helpers =====================
 
-def _wait_for_docx(folder: str, timeout: int = 90) -> str:
+def _wait_for_docx(folder: str, timeout: int = 120) -> str:
     for _ in range(timeout):
         for f in os.listdir(folder):
             if f.lower().endswith(".docx"):
@@ -257,7 +350,14 @@ def _download_images_from_detail(driver, download_dir: str) -> List[str]:
             src = t.get_attribute("src")
             if src and src.startswith("http"):
                 r = requests.get(src, timeout=15)
-                p = os.path.join(download_dir, f"image_{i}.jpg")
+                # Lấy tên từ header nếu có
+                cd = r.headers.get("Content-Disposition", "")
+                if cd:
+                    m = re.search(r'filename="?([^"]+)"?', cd)
+                else:
+                    m = None
+                name = m.group(1) if m else f"image_{i}.jpg"
+                p = os.path.join(download_dir, name)
                 with open(p, "wb") as f:
                     f.write(r.content)
                 images.append(p)
