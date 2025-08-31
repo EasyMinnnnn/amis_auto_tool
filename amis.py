@@ -25,13 +25,11 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
-    # Các flag an toàn phổ biến cho môi trường container/Cloud:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1440,900")
-    # Nếu chắc chắn chromium ở path cụ thể thì mở dòng dưới (Cloud thường KHÔNG cần):
-    # opts.binary_location = "/usr/bin/chromium"
+    # opts.binary_location = "/usr/bin/chromium"  # nếu cần
 
     prefs = {
         "download.default_directory": download_dir,
@@ -134,7 +132,6 @@ def run_automation(
 
         # 2) Mở trang Quy trình (Lượt chạy)
         driver.get("https://amisapp.misa.vn/process/execute/1")
-        # chờ top nav có mặt (UI chính đã tải)
         try:
             WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav"))
@@ -143,17 +140,13 @@ def run_automation(
             pass
         time.sleep(1.0)
 
-        # 3) Mở ô tìm kiếm theo đúng thao tác click → gõ → Enter,
-        #    ưu tiên dựa vào #top_nav và activeElement thay vì locator cụ thể.
+        # 3) Mở ô tìm kiếm theo thao tác click → gõ → Enter
 
         def _click_search_area_once() -> None:
-            # Cuộn về top để chắc chắn vùng top_nav visible
             try:
                 driver.execute_script("window.scrollTo(0,0);")
             except Exception:
                 pass
-
-            # Các vị trí có khả năng mở hộp search
             click_targets = [
                 (By.CSS_SELECTOR, "#top_nav .global-search-wrap"),
                 (By.CSS_SELECTOR, ".global-search-wrap"),
@@ -174,12 +167,7 @@ def run_automation(
         def _try_keyboard_shortcuts() -> None:
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
-                # nhiều app bật search bằng '/', Ctrl+K, Ctrl+F
-                for combo in [
-                    ("/",),
-                    (Keys.CONTROL, "k"),
-                    (Keys.CONTROL, "f"),
-                ]:
+                for combo in [("/",), (Keys.CONTROL, "k"), (Keys.CONTROL, "f")]:
                     try:
                         if len(combo) == 1:
                             body.send_keys(combo[0])
@@ -198,7 +186,6 @@ def run_automation(
                 return False
             if tag in ("textarea", "input"):
                 return el.is_enabled() and el.is_displayed()
-            # contenteditable
             try:
                 ce = el.get_attribute("contenteditable")
                 if ce and ce.lower() == "true":
@@ -208,7 +195,6 @@ def run_automation(
             return False
 
         def _focus_typable_via_js():
-            # Tìm phần tử gõ được bằng JS và focus (kể cả trong iframe same-origin)
             js = """
 return (function(){
   function isVisible(el){
@@ -261,7 +247,7 @@ return (function(){
             except Exception:
                 return None
 
-        def _get_active() :
+        def _get_active():
             try:
                 return driver.switch_to.active_element
             except Exception:
@@ -270,22 +256,17 @@ return (function(){
         def _obtain_search_focus(timeout_s=55):
             end = time.time() + timeout_s
             while time.time() < end:
-                # 1) click vùng search
                 _click_search_area_once()
-                # 2) thử lấy activeElement
                 el = _get_active()
                 if el and _is_typable(el):
                     return el
-                # 3) thử JS tìm phần tử có thể gõ
                 el = _focus_typable_via_js()
                 if el and _is_typable(el):
                     return el
-                # 4) thử phím tắt
                 _try_keyboard_shortcuts()
                 el = _get_active()
                 if el and _is_typable(el):
                     return el
-                # 5) Tab một cái để nhảy vào input nếu đang trong overlay
                 try:
                     driver.find_element(By.TAG_NAME, "body").send_keys(Keys.TAB)
                     time.sleep(0.08)
@@ -306,7 +287,7 @@ return (function(){
                 "Đã lưu debug screenshot/HTML trong thư mục download."
             )
 
-        # 4) Bơm record_id & nhấn Enter (ưu tiên send_keys; fallback JS)
+        # 4) Gõ record_id + Enter
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", search_el)
             driver.execute_script("arguments[0].focus();", search_el)
@@ -320,31 +301,60 @@ return (function(){
             time.sleep(0.1)
             search_el.send_keys(Keys.ENTER)
         except Exception:
-            # Fallback JS nếu send_keys không hoạt động
             driver.execute_script("""
                 const el = arguments[0], val = arguments[1];
                 if (!el) return;
                 el.focus && el.focus();
                 const tag = (el.tagName||'').toLowerCase();
-                if (tag === 'textarea' || tag === 'input') {
-                  el.value = val;
-                } else {
-                  el.textContent = val;
-                }
+                if (tag === 'textarea' || tag === 'input') { el.value = val; }
+                else { el.textContent = val; }
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
                 el.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', bubbles:true}));
             """, search_el, str(record_id))
 
-        # 5) Chờ panel kết quả và click đúng ID
-        try:
-            result_link = WebDriverWait(driver, 25).until(
-                EC.presence_of_element_located((By.XPATH, f"//a[normalize-space()='{record_id}']"))
+        # 5) BẮT POPUP KẾT QUẢ DevExtreme VÀ CLICK ĐÚNG ID
+        #    Theo đường dẫn bạn cung cấp: body > div.dx-overlay-wrapper.dx-popup-wrapper... > .dx-popup-content ... .box-result ... .region-result-tab > a > div > span
+        def _wait_results_popup(timeout_s=20):
+            return WebDriverWait(driver, timeout_s).until(
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper .dx-popup-content, "
+                    "body > div.dx-overlay-wrapper .dx-popup-content"
+                ))
             )
-        except Exception:
-            result_link = WebDriverWait(driver, 25).until(
-                EC.presence_of_element_located((By.XPATH, f"//a[contains(.,'{record_id}')]"))
-            )
+
+        def _find_result_link():
+            # 1) chờ popup lộ diện
+            try:
+                _wait_results_popup(20)
+            except Exception:
+                return None
+
+            # 2) ưu tiên match <span> chứa record_id rồi đi lên ancestor <a>
+            xpaths = [
+                f"//div[contains(@class,'box-result')]//a[.//span[normalize-space()='{record_id}']]",
+                f"//div[contains(@class,'region-result-tab')]//a[.//span[contains(normalize-space(.),'{record_id}')]]",
+                f"//div[contains(@class,'box-result')]//a[contains(.,'{record_id}')]",
+            ]
+            for xp in xpaths:
+                try:
+                    el = driver.find_element(By.XPATH, xp)
+                    if el.is_displayed():
+                        return el
+                except Exception:
+                    pass
+
+            # 3) fallback: lấy kết quả đầu tiên nếu không thấy exact match
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, ".box-result .region-result-tab a, .box-result a")
+                if el.is_displayed():
+                    return el
+            except Exception:
+                pass
+            return None
+
+        result_link = WebDriverWait(driver, 25).until(lambda d: _find_result_link())
 
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", result_link)
         driver.execute_script("arguments[0].click();", result_link)
