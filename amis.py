@@ -11,6 +11,7 @@ from typing import List, Tuple, Optional
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -40,7 +41,7 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     return webdriver.Chrome(options=opts)
 
 
-# ===================== Utilities (gọn) =====================
+# ===================== Utils (gọn) =====================
 
 def _wait_css(driver, css: str, timeout: int = 15):
     return WebDriverWait(driver, timeout).until(
@@ -52,19 +53,28 @@ def _visible_and_clickable(driver, css: str, timeout: int = 15):
         EC.element_to_be_clickable((By.CSS_SELECTOR, css))
     )
 
-def _js_click(driver, el):
+def _scroll_into_view_click(driver, el):
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-    driver.execute_script("arguments[0].click();", el)
+    try:
+        el.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", el)
+
+def _hover_then_click(driver, el):
+    try:
+        ActionChains(driver).move_to_element(el).pause(0.1).click(el).perform()
+    except Exception:
+        _scroll_into_view_click(driver, el)
 
 def _try_click(driver, css: str, timeout: int = 8) -> bool:
     try:
         el = _visible_and_clickable(driver, css, timeout)
-        _js_click(driver, el)
+        _hover_then_click(driver, el)
         return True
     except Exception:
         try:
             el = driver.find_element(By.CSS_SELECTOR, css)
-            _js_click(driver, el)
+            _hover_then_click(driver, el)
             return True
         except Exception:
             return False
@@ -79,30 +89,25 @@ def _dump_debug(driver, out_dir: str, tag: str) -> None:
         pass
 
 
-# ===================== Theo các bước bạn cung cấp =====================
+# ===================== CSS theo bạn cung cấp =====================
 
-# 1) Nút 3 chấm (More). Selector bạn gửi có tiền tố #popupexecution (khi popup đã mở).
-#   Trên trang chi tiết, phần “more” thường là .wrap-icon-more.more-title-execution > button
-MORE_BUTTON_CANDIDATES = [
-    # Cụ thể hoá theo mô tả của bạn (bỏ #popupexecution vì lúc đó chưa có popup)
-    "div.d-flex.justify-flexend.wrap-icon-more.more-title-execution > button",
-    "div.wrap-icon-more.more-title-execution > button",
-    "div.wrap-icon-more > button",
-    # fallback chung
-    "button.ms-action, button[aria-label*='Thao tác'], button[title*='Thao tác']",
-    "i.dx-icon-overflow, i.icon-more"
-]
-
-# 2) Mục “In mẫu thiết lập” trong popover
-IN_MAU_ITEM_STRICT = (
-    "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper."
-    "popover-action-process.dx-popover-without-title.dx-position-bottom"
-    " > div > div.dx-popup-content > div > div:nth-child(2)"
+# (1) Nút ba chấm (More) – bỏ tiền tố #popupexecution vì lúc đó popup chưa có
+MORE_BTN_STRICT = (
+    "div.nav.flex.items-center.offset-title-information > "
+    "div.d-flex.content-user > "
+    "div.d-flex.justify-flexend.wrap-icon-more.m-t-14.more-title-execution > button > div > i"
 )
-IN_MAU_ITEM_RELAXED = "div.dx-popover-wrapper.popover-action-process .dx-popup-content > div > div:nth-child(2)"
+MORE_BTN_RELAX = "div.d-flex.justify-flexend.wrap-icon-more.more-title-execution > button, .wrap-icon-more.more-title-execution > button"
 
-# 3) Popup #popupexecution => tick mẫu thứ 3 (checkbox trong label)
-CHECKBOX_MAU_THU_BA = (
+# (2) Item “In mẫu thiết lập” trong popover
+IN_MAU_STRICT = (
+    "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process."
+    "dx-popover-without-title.dx-position-bottom > div > div.dx-popup-content > div > div:nth-child(2)"
+)
+IN_MAU_RELAX = "div.dx-popover-wrapper.popover-action-process .dx-popup-content > div > div:nth-child(2)"
+
+# (3) Tick checkbox mẫu thứ 3
+CHECKBOX_MAU3 = (
     "#popupexecution > div.ms-popup.flex.flex-col > div.ms-popup--content-header > div:nth-child(2) > "
     "div > div > div > div.dx-popup-content > div > div > div.dx-scrollable-wrapper > "
     "div > div.dx-scrollable-content > div.dx-scrollview-content > div > div > "
@@ -110,8 +115,8 @@ CHECKBOX_MAU_THU_BA = (
     "span.icon-square-check-primary.checkmark"
 )
 
-# 4) Nút Tải xuống (ô chữ xanh)
-DOWNLOAD_TEXT_BLUE = (
+# (4) Nút “Tải xuống mẫu in đã chọn” (ô chữ xanh)
+DOWNLOAD_BLUE = (
     "#popupexecution > div.ms-popup.flex.flex-col > div.ms-popup--content-header > div:nth-child(2) > "
     "div > div > div > div.dx-popup-content > div > div > div.dx-scrollable-wrapper > "
     "div > div.dx-scrollable-content > div.dx-scrollview-content > div > div > "
@@ -119,64 +124,84 @@ DOWNLOAD_TEXT_BLUE = (
     "div > div.text-blue"
 )
 
+POPOVER_WRAPPER = "body div.dx-popover-wrapper.popover-action-process, body div.dx-popup-wrapper.popover-action-process"
+POPUPEXECUTION = "#popupexecution"
+
+
+# ===================== Open popover & chọn “In mẫu thiết lập” =====================
+
 def _open_print_preview_via_popover(driver, download_dir: str) -> None:
-    # Nếu popup đã mở thì thôi
+    # Nếu popup preview đã mở thì thôi
     try:
-        if driver.find_elements(By.CSS_SELECTOR, "#popupexecution"):
+        if driver.find_elements(By.CSS_SELECTOR, POPUPEXECUTION):
             return
     except Exception:
         pass
 
-    # 1) Click nút ba chấm (More)
-    clicked_more = False
-    for css in MORE_BUTTON_CANDIDATES:
-        if _try_click(driver, css, timeout=5):
-            clicked_more = True
-            break
+    # Đưa viewport lên đầu để tránh header che nút
+    try:
+        driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(0.2)
+    except Exception:
+        pass
 
+    # (1) Click nút ba chấm
+    clicked_more = _try_click(driver, MORE_BTN_STRICT, timeout=6)
+    if not clicked_more:
+        clicked_more = _try_click(driver, MORE_BTN_RELAX, timeout=6)
     if not clicked_more:
         _dump_debug(driver, download_dir, "cannot_click_more_button")
-        # vẫn thử bắn thẳng “In mẫu thiết lập” ở bước kế tiếp
+        # vẫn tiếp tục thử bắn “In mẫu thiết lập” ở bước dưới
 
-    # 2) Click “In mẫu thiết lập” trong popover
-    if not _try_click(driver, IN_MAU_ITEM_STRICT, timeout=6):
-        if not _try_click(driver, IN_MAU_ITEM_RELAXED, timeout=6):
-            # fallback theo text trong toàn trang
-            try:
-                driver.execute_script("""
+    # Chờ popover hiện (nếu đã click được)
+    if clicked_more:
+        end = time.time() + 8
+        while time.time() < end and not driver.find_elements(By.CSS_SELECTOR, POPOVER_WRAPPER):
+            time.sleep(0.2)
+
+    # (2) Click “In mẫu thiết lập”
+    clicked_in_mau = _try_click(driver, IN_MAU_STRICT, timeout=5)
+    if not clicked_in_mau:
+        clicked_in_mau = _try_click(driver, IN_MAU_RELAX, timeout=5)
+
+    if not clicked_in_mau:
+        # Fallback JS theo text
+        try:
+            driver.execute_script("""
 const wants = ['In mẫu thiết lập','Xem trước mẫu in','In mẫu','Mẫu in','Xem trước'];
-function vis(el){if(!el)return false;const s=getComputedStyle(el); if(s.display==='none'||s.visibility==='hidden')return false;
+function vis(el){if(!el)return false; const s=getComputedStyle(el);
+  if(s.display==='none'||s.visibility==='hidden') return false;
   const r=el.getBoundingClientRect(); return r.width>0 && r.height>0; }
 const all=document.querySelectorAll('*');
 for(const el of all){ if(!vis(el)) continue; const t=(el.innerText||'').trim(); if(!t) continue;
   for(const w of wants){ if(t.includes(w)){ try{ el.scrollIntoView({block:'center'}); el.click(); return; }catch(e){} } } }
 """)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-    # 3) Chờ popup preview xuất hiện
+    # (3) Chờ popup preview xuất hiện
     try:
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#popupexecution")))
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, POPUPEXECUTION)))
     except Exception:
         _dump_debug(driver, download_dir, "no_popupexecution_after_in_mau")
         raise TimeoutException("Không mở được 'In mẫu thiết lập'.")
 
 
-def _choose_template_and_download(driver, download_dir: str) -> str:
-    # Chắc chắn popup có mặt
-    _wait_css(driver, "#popupexecution", timeout=20)
+# ===================== Chọn template & tải xuống =====================
 
-    # Tick mẫu thứ 3 (đúng CSS bạn đưa)
-    if not _try_click(driver, CHECKBOX_MAU_THU_BA, timeout=8):
+def _choose_template_and_download(driver, download_dir: str) -> str:
+    _wait_css(driver, POPUPEXECUTION, timeout=20)
+
+    # Tick mẫu thứ 3
+    if not _try_click(driver, CHECKBOX_MAU3, timeout=8):
         _dump_debug(driver, download_dir, "cannot_tick_template_3")
         raise TimeoutException("Không tick được mẫu thứ 3 trong popup.")
 
     time.sleep(0.3)
 
-    # Click “Tải xuống mẫu in đã chọn” (ô chữ xanh)
-    if not _try_click(driver, DOWNLOAD_TEXT_BLUE, timeout=8):
-        # Fallback: tìm text “Tải xuống/Tải về/Download” trong #popupexecution
+    # Nút Tải xuống màu xanh
+    if not _try_click(driver, DOWNLOAD_BLUE, timeout=8):
+        # Fallback: tìm text trong #popupexecution
         try:
             driver.execute_script("""
 const root=document.querySelector('#popupexecution'); if(!root) return;
@@ -191,7 +216,6 @@ for(const el of all){ if(!vis(el)) continue; const t=(el.innerText||'').trim(); 
         except Exception:
             pass
 
-    # Chờ file .docx xuất hiện
     return _wait_for_docx(download_dir, timeout=120)
 
 
@@ -233,8 +257,7 @@ def run_automation(
             (By.CSS_SELECTOR, "[aria-label='Close'],[data-dismiss],.close"),
         ]:
             try:
-                driver.find_element(by, sel).click()
-                time.sleep(0.1)
+                driver.find_element(by, sel).click(); time.sleep(0.1)
             except Exception:
                 pass
 
@@ -253,7 +276,7 @@ def run_automation(
         # 3) Mở In mẫu thiết lập
         _open_print_preview_via_popover(driver, download_dir)
 
-        # 4) Tick mẫu thứ 3 + Tải xuống
+        # 4) Tick mẫu 3 & Tải xuống
         template_path = _choose_template_and_download(driver, download_dir)
 
         # 5) Ảnh minh hoạ (best-effort)
