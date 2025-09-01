@@ -109,10 +109,52 @@ def _dump_debug(driver, out_dir: str, tag: str) -> None:
     except Exception:
         pass
 
+# ======= Helpers bổ sung theo yêu cầu =======
+
+def _log(msg: str):
+    print(f"[AMIS] {msg}")
+
+def _click_xpath(driver, xp: str, timeout: int = 15):
+    el = WebDriverWait(driver, timeout).until(
+        EC.element_to_be_clickable((By.XPATH, xp))
+    )
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    try:
+        el.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", el)
+
+def _switch_into_notification_detail(driver, timeout: int = 15):
+    driver.switch_to.default_content()
+    WebDriverWait(driver, timeout).until(
+        EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#notification-detail"))
+    )
+
+def _wait_popupexecution_anywhere(driver, timeout: int = 20) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            # thử ở top
+            driver.switch_to.default_content()
+            if driver.find_elements(By.CSS_SELECTOR, "#popupexecution"):
+                return True
+        except Exception:
+            pass
+        try:
+            # thử trong iframe
+            _switch_into_notification_detail(driver, timeout=5)
+            if driver.find_elements(By.CSS_SELECTOR, "#popupexecution"):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
 # ===================== Selector definitions =====================
+
 # Legacy CSS selectors (kept for fallback)
 
-# (1) Nút ba chấm (More) – bỏ tiền tố #popupexecution vì lúc đó popup chưa có
+# (1) Nút ba chấm (More)
 MORE_BTN_STRICT = (
     "div.nav.flex.items-center.offset-title-information > "
     "div.d-flex.content-user > "
@@ -154,132 +196,107 @@ POPOVER_WRAPPER = (
 )
 POPUPEXECUTION = "#popupexecution"
 
-# New XPath selectors provided by the user
-# These absolute paths correspond to elements on the AMIS site after recent DOM updates.
-XPATH_MORE_BTN = (
-    "/html/body/div[1]/div[2]/div[2]/div/div[2]/div/div/div[1]/div[1]/div[2]/div[2]/button/div/i"
-)
-XPATH_IN_MAU = (
-    "/html/body/div[12]/div/div[2]/div/div[2]"
-)
-XPATH_CHECKBOX_MAU3 = (
-    "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/"
-    "div[1]/div[2]/div/div/div[1]/div[2]/div[3]/label/span[1]"
-)
-XPATH_DOWNLOAD_BLUE = (
-    "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/"
-    "div[1]/div[2]/div/div/div[1]/div[2]/div[1]/div/div[2]"
-)
+# ===== XPATH tuyệt đối do bạn cung cấp =====
+XPATH_MORE_BTN = "/html/body/div[1]/div[2]/div[2]/div/div[2]/div/div/div[1]/div[1]/div[2]/div[2]/button/div/i"
+XPATH_IN_MAU   = "/html/body/div[12]/div/div[2]/div/div[2]"
+XPATH_CHECKBOX_MAU3 = "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/div[1]/div[2]/div/div/div[1]/div[2]/div[3]/label/span[1]"
+XPATH_DOWNLOAD_BLUE = "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/div[1]/div[2]/div/div/div[1]/div[2]/div[1]/div/div[2]"
 
 # ===================== Open popover & chọn “In mẫu thiết lập” =====================
 
 def _open_print_preview_via_popover(driver, download_dir: str) -> None:
-    """Open the popover and click 'In mẫu thiết lập' to open the print preview.
-
-    This version first attempts to use the absolute XPaths supplied by the user.
-    If those fail (e.g. DOM structure changes again), it falls back to the older
-    CSS-based selectors and finally a text-based search via JavaScript.
     """
-    # If popup preview (#popupexecution) already exists, no need to open again
+    Mở popover và click 'In mẫu thiết lập' để khởi tạo popup #popupexecution.
+
+    - Nút 3 chấm (More) phải click TRONG iframe (#notification-detail)
+    - Item 'In mẫu thiết lập' xuất hiện ở TOP document (default_content)
+    - Có fallback CSS cũ và dump debug nếu fail
+    """
+    # Nếu popup đã có thì thôi
+    if _wait_popupexecution_anywhere(driver, timeout=1):
+        _log("Popup #popupexecution đã mở sẵn.")
+        return
+
+    # (A) Click nút 3 chấm trong iframe
+    _switch_into_notification_detail(driver, timeout=20)
     try:
-        if driver.find_elements(By.CSS_SELECTOR, POPUPEXECUTION):
-            return
-    except Exception:
-        pass
+        _click_xpath(driver, XPATH_MORE_BTN, timeout=12)
+        _log("Đã click nút 3 chấm (More)")
+    except Exception as e:
+        _dump_debug(driver, download_dir, "cannot_click_more_xpath")
+        raise TimeoutException(f"Không click được nút 3 chấm: {e}")
 
-    # Bring viewport to the top to avoid header overlapping the button
+    # (B) Click “In mẫu thiết lập” – popover thường ở top document
+    driver.switch_to.default_content()
     try:
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(0.2)
-    except Exception:
-        pass
-
-    # (1) Click the three-dot 'More' button
-    clicked_more = _try_click_xpath(driver, XPATH_MORE_BTN, timeout=6)
-    if not clicked_more:
-        # Fall back to the original CSS selectors
-        clicked_more = _try_click(driver, MORE_BTN_STRICT, timeout=6)
-    if not clicked_more:
-        clicked_more = _try_click(driver, MORE_BTN_RELAX, timeout=6)
-    if not clicked_more:
-        _dump_debug(driver, download_dir, "cannot_click_more_button")
-        # Still continue to attempt clicking 'In mẫu thiết lập' below
-
-    # Wait for popover to appear if 'More' was clicked
-    if clicked_more:
-        end = time.time() + 8
-        while time.time() < end and not driver.find_elements(By.CSS_SELECTOR, POPOVER_WRAPPER):
-            time.sleep(0.2)
-
-    # (2) Click “In mẫu thiết lập”
-    clicked_in_mau = _try_click_xpath(driver, XPATH_IN_MAU, timeout=5)
-    if not clicked_in_mau:
-        clicked_in_mau = _try_click(driver, IN_MAU_STRICT, timeout=5)
-    if not clicked_in_mau:
-        clicked_in_mau = _try_click(driver, IN_MAU_RELAX, timeout=5)
-
-    if not clicked_in_mau:
-        # Fallback JavaScript search by innerText
+        _click_xpath(driver, XPATH_IN_MAU, timeout=12)
+        _log("Đã click 'In mẫu thiết lập' (XPath tuyệt đối)")
+    except Exception as e:
+        # fallback: thử click theo CSS cũ trong iframe (phòng khi popover render trong iframe)
         try:
-            driver.execute_script(
-                """
-const wants = ['In mẫu thiết lập','Xem trước mẫu in','In mẫu','Mẫu in','Xem trước'];
-function vis(el){if(!el)return false; const s=getComputedStyle(el);
-  if(s.display==='none'||s.visibility==='hidden') return false;
-  const r=el.getBoundingClientRect(); return r.width>0 && r.height>0; }
-const all=document.querySelectorAll('*');
-for(const el of all){ if(!vis(el)) continue; const t=(el.innerText||'').trim(); if(!t) continue;
-  for(const w of wants){ if(t.includes(w)){ try{ el.scrollIntoView({block:'center'}); el.click(); return; }catch(e){} } } }
-"""
-            )
-        except Exception:
-            pass
+            _switch_into_notification_detail(driver, timeout=10)
+            clicked = _try_click(driver, IN_MAU_STRICT, timeout=5) or _try_click(driver, IN_MAU_RELAX, timeout=5)
+            if not clicked:
+                raise
+            _log("Đã click 'In mẫu thiết lập' theo CSS (fallback)")
+        except Exception as e2:
+            _dump_debug(driver, download_dir, "fail_click_in_mau_xpath_and_css")
+            raise TimeoutException(f"Không mở được 'In mẫu thiết lập' (XPath & CSS đều fail): {e2}")
 
-    # (3) Wait for popup preview (#popupexecution) to appear
-    try:
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, POPUPEXECUTION)))
-    except Exception:
-        _dump_debug(driver, download_dir, "no_popupexecution_after_in_mau")
-        raise TimeoutException("Không mở được 'In mẫu thiết lập'.")
+    # (C) Đợi popup xuất hiện (ở top hoặc trong iframe)
+    if not _wait_popupexecution_anywhere(driver, timeout=20):
+        _dump_debug(driver, download_dir, "no_popupexecution_after_click_in_mau")
+        raise TimeoutException("Không mở được 'In mẫu thiết lập' (không thấy #popupexecution).")
 
 # ===================== Chọn template & tải xuống =====================
 
 def _choose_template_and_download(driver, download_dir: str) -> str:
-    """Select the third template and download it.
-
-    Attempts to use the new XPaths provided by the user. Falls back to the older CSS selectors and a text-based search.
     """
-    _wait_css(driver, POPUPEXECUTION, timeout=20)
+    Chọn mẫu thứ 3 và tải .docx, dùng XPath bạn cung cấp, có fallback CSS & tìm theo text.
+    """
+    # Đợi popup xuất hiện
+    if not _wait_popupexecution_anywhere(driver, timeout=25):
+        _dump_debug(driver, download_dir, "no_popup_when_choose_template")
+        raise TimeoutException("Popup 'Xem trước mẫu in' không xuất hiện.")
 
-    # Tick the third template checkbox
-    if not _try_click_xpath(driver, XPATH_CHECKBOX_MAU3, timeout=8):
-        if not _try_click(driver, CHECKBOX_MAU3, timeout=8):
-            _dump_debug(driver, download_dir, "cannot_tick_template_3")
-            raise TimeoutException("Không tick được mẫu thứ 3 trong popup.")
+    # Các control bên trong popup nằm trong iframe chính
+    _switch_into_notification_detail(driver, timeout=15)
+
+    # Tick mẫu thứ 3
+    try:
+        _click_xpath(driver, XPATH_CHECKBOX_MAU3, timeout=12)
+        _log("Tick mẫu thứ 3 (XPath)")
+    except Exception:
+        # fallback về CSS cũ nếu cần
+        if not _try_click(driver, CHECKBOX_MAU3, timeout=6):
+            _dump_debug(driver, download_dir, "cannot_tick_template_3_xpath_and_css")
+            raise TimeoutException("Không tick được mẫu thứ 3.")
 
     time.sleep(0.3)
 
-    # Click the "Tải xuống mẫu in" button
-    if not _try_click_xpath(driver, XPATH_DOWNLOAD_BLUE, timeout=8):
-        if not _try_click(driver, DOWNLOAD_BLUE, timeout=8):
-            # Fallback: find by inner text within #popupexecution
+    # Bấm “Tải mẫu in”
+    try:
+        _click_xpath(driver, XPATH_DOWNLOAD_BLUE, timeout=12)
+        _log("Click 'Tải mẫu in' (XPath)")
+    except Exception:
+        # fallback về CSS cũ
+        if not _try_click(driver, DOWNLOAD_BLUE, timeout=6):
+            # fallback cuối: quét text trong #popupexecution
             try:
-                driver.execute_script(
-                    """
+                driver.execute_script("""
 const root=document.querySelector('#popupexecution'); if(!root) return;
 function vis(el){if(!el)return false; const s=getComputedStyle(el);
   if(s.display==='none'||s.visibility==='hidden') return false;
   const r=el.getBoundingClientRect(); return r.width>0 && r.height>0; }
-const wants=['Tải xuống','Tải về','Download'];
+const wants=['Tải mẫu in','Tải xuống','Tải về','Download'];
 const all=root.querySelectorAll('*');
 for(const el of all){ if(!vis(el)) continue; const t=(el.innerText||'').trim(); if(!t) continue;
   for(const w of wants){ if(t.includes(w)){ try{ el.scrollIntoView({block:'center'}); el.click(); return; }catch(e){} } } }
-"""
-                )
+""")
             except Exception:
                 pass
 
-    # Wait for .docx file to appear in the downloads directory
+    # Chờ file .docx xuất hiện
     return _wait_for_docx(download_dir, timeout=120)
 
 # ===================== MAIN =====================
