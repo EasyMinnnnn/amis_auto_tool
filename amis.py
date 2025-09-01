@@ -5,7 +5,10 @@ Luồng làm việc (không gọi API/tìm kiếm):
 - Chờ popup #popupexecution -> tick mẫu thứ 3 -> 'Tải xuống mẫu in đã chọn'
 """
 
-import os, time, re, requests
+import os
+import time
+import re
+import requests
 from typing import List, Tuple, Optional
 
 from selenium import webdriver
@@ -18,7 +21,6 @@ from selenium.common.exceptions import TimeoutException
 
 from docx import Document
 from docx.shared import Inches
-
 
 # ===================== Selenium base =====================
 
@@ -39,7 +41,6 @@ def _make_driver(download_dir: str, headless: bool = True) -> webdriver.Chrome:
     }
     opts.add_experimental_option("prefs", prefs)
     return webdriver.Chrome(options=opts)
-
 
 # ===================== Utils (gọn) =====================
 
@@ -67,6 +68,7 @@ def _hover_then_click(driver, el):
         _scroll_into_view_click(driver, el)
 
 def _try_click(driver, css: str, timeout: int = 8) -> bool:
+    """Try to click an element specified by a CSS selector."""
     try:
         el = _visible_and_clickable(driver, css, timeout)
         _hover_then_click(driver, el)
@@ -74,6 +76,25 @@ def _try_click(driver, css: str, timeout: int = 8) -> bool:
     except Exception:
         try:
             el = driver.find_element(By.CSS_SELECTOR, css)
+            _hover_then_click(driver, el)
+            return True
+        except Exception:
+            return False
+
+def _try_click_xpath(driver, xpath: str, timeout: int = 8) -> bool:
+    """Try to click an element specified by an XPath selector.
+
+    This helper mirrors _try_click but works with absolute or relative XPaths.
+    """
+    try:
+        el = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, xpath))
+        )
+        _hover_then_click(driver, el)
+        return True
+    except Exception:
+        try:
+            el = driver.find_element(By.XPATH, xpath)
             _hover_then_click(driver, el)
             return True
         except Exception:
@@ -88,8 +109,8 @@ def _dump_debug(driver, out_dir: str, tag: str) -> None:
     except Exception:
         pass
 
-
-# ===================== CSS theo bạn cung cấp =====================
+# ===================== Selector definitions =====================
+# Legacy CSS selectors (kept for fallback)
 
 # (1) Nút ba chấm (More) – bỏ tiền tố #popupexecution vì lúc đó popup chưa có
 MORE_BTN_STRICT = (
@@ -97,7 +118,10 @@ MORE_BTN_STRICT = (
     "div.d-flex.content-user > "
     "div.d-flex.justify-flexend.wrap-icon-more.m-t-14.more-title-execution > button > div > i"
 )
-MORE_BTN_RELAX = "div.d-flex.justify-flexend.wrap-icon-more.more-title-execution > button, .wrap-icon-more.more-title-execution > button"
+MORE_BTN_RELAX = (
+    "div.d-flex.justify-flexend.wrap-icon-more.more-title-execution > button, "
+    ".wrap-icon-more.more-title-execution > button"
+)
 
 # (2) Item “In mẫu thiết lập” trong popover
 IN_MAU_STRICT = (
@@ -124,50 +148,81 @@ DOWNLOAD_BLUE = (
     "div > div.text-blue"
 )
 
-POPOVER_WRAPPER = "body div.dx-popover-wrapper.popover-action-process, body div.dx-popup-wrapper.popover-action-process"
+POPOVER_WRAPPER = (
+    "body div.dx-popover-wrapper.popover-action-process, "
+    "body div.dx-popup-wrapper.popover-action-process"
+)
 POPUPEXECUTION = "#popupexecution"
 
+# New XPath selectors provided by the user
+# These absolute paths correspond to elements on the AMIS site after recent DOM updates.
+XPATH_MORE_BTN = (
+    "/html/body/div[1]/div[2]/div[2]/div/div[2]/div/div/div[1]/div[1]/div[2]/div[2]/button/div/i"
+)
+XPATH_IN_MAU = (
+    "/html/body/div[12]/div/div[2]/div/div[2]"
+)
+XPATH_CHECKBOX_MAU3 = (
+    "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/"
+    "div[1]/div[2]/div/div/div[1]/div[2]/div[3]/label/span[1]"
+)
+XPATH_DOWNLOAD_BLUE = (
+    "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/"
+    "div[1]/div[2]/div/div/div[1]/div[2]/div[1]/div/div[2]"
+)
 
 # ===================== Open popover & chọn “In mẫu thiết lập” =====================
 
 def _open_print_preview_via_popover(driver, download_dir: str) -> None:
-    # Nếu popup preview đã mở thì thôi
+    """Open the popover and click 'In mẫu thiết lập' to open the print preview.
+
+    This version first attempts to use the absolute XPaths supplied by the user.
+    If those fail (e.g. DOM structure changes again), it falls back to the older
+    CSS-based selectors and finally a text-based search via JavaScript.
+    """
+    # If popup preview (#popupexecution) already exists, no need to open again
     try:
         if driver.find_elements(By.CSS_SELECTOR, POPUPEXECUTION):
             return
     except Exception:
         pass
 
-    # Đưa viewport lên đầu để tránh header che nút
+    # Bring viewport to the top to avoid header overlapping the button
     try:
         driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(0.2)
     except Exception:
         pass
 
-    # (1) Click nút ba chấm
-    clicked_more = _try_click(driver, MORE_BTN_STRICT, timeout=6)
+    # (1) Click the three-dot 'More' button
+    clicked_more = _try_click_xpath(driver, XPATH_MORE_BTN, timeout=6)
+    if not clicked_more:
+        # Fall back to the original CSS selectors
+        clicked_more = _try_click(driver, MORE_BTN_STRICT, timeout=6)
     if not clicked_more:
         clicked_more = _try_click(driver, MORE_BTN_RELAX, timeout=6)
     if not clicked_more:
         _dump_debug(driver, download_dir, "cannot_click_more_button")
-        # vẫn tiếp tục thử bắn “In mẫu thiết lập” ở bước dưới
+        # Still continue to attempt clicking 'In mẫu thiết lập' below
 
-    # Chờ popover hiện (nếu đã click được)
+    # Wait for popover to appear if 'More' was clicked
     if clicked_more:
         end = time.time() + 8
         while time.time() < end and not driver.find_elements(By.CSS_SELECTOR, POPOVER_WRAPPER):
             time.sleep(0.2)
 
     # (2) Click “In mẫu thiết lập”
-    clicked_in_mau = _try_click(driver, IN_MAU_STRICT, timeout=5)
+    clicked_in_mau = _try_click_xpath(driver, XPATH_IN_MAU, timeout=5)
+    if not clicked_in_mau:
+        clicked_in_mau = _try_click(driver, IN_MAU_STRICT, timeout=5)
     if not clicked_in_mau:
         clicked_in_mau = _try_click(driver, IN_MAU_RELAX, timeout=5)
 
     if not clicked_in_mau:
-        # Fallback JS theo text
+        # Fallback JavaScript search by innerText
         try:
-            driver.execute_script("""
+            driver.execute_script(
+                """
 const wants = ['In mẫu thiết lập','Xem trước mẫu in','In mẫu','Mẫu in','Xem trước'];
 function vis(el){if(!el)return false; const s=getComputedStyle(el);
   if(s.display==='none'||s.visibility==='hidden') return false;
@@ -175,35 +230,42 @@ function vis(el){if(!el)return false; const s=getComputedStyle(el);
 const all=document.querySelectorAll('*');
 for(const el of all){ if(!vis(el)) continue; const t=(el.innerText||'').trim(); if(!t) continue;
   for(const w of wants){ if(t.includes(w)){ try{ el.scrollIntoView({block:'center'}); el.click(); return; }catch(e){} } } }
-""")
+"""
+            )
         except Exception:
             pass
 
-    # (3) Chờ popup preview xuất hiện
+    # (3) Wait for popup preview (#popupexecution) to appear
     try:
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, POPUPEXECUTION)))
     except Exception:
         _dump_debug(driver, download_dir, "no_popupexecution_after_in_mau")
         raise TimeoutException("Không mở được 'In mẫu thiết lập'.")
 
-
 # ===================== Chọn template & tải xuống =====================
 
 def _choose_template_and_download(driver, download_dir: str) -> str:
+    """Select the third template and download it.
+
+    Attempts to use the new XPaths provided by the user. Falls back to the older CSS selectors and a text-based search.
+    """
     _wait_css(driver, POPUPEXECUTION, timeout=20)
 
-    # Tick mẫu thứ 3
-    if not _try_click(driver, CHECKBOX_MAU3, timeout=8):
-        _dump_debug(driver, download_dir, "cannot_tick_template_3")
-        raise TimeoutException("Không tick được mẫu thứ 3 trong popup.")
+    # Tick the third template checkbox
+    if not _try_click_xpath(driver, XPATH_CHECKBOX_MAU3, timeout=8):
+        if not _try_click(driver, CHECKBOX_MAU3, timeout=8):
+            _dump_debug(driver, download_dir, "cannot_tick_template_3")
+            raise TimeoutException("Không tick được mẫu thứ 3 trong popup.")
 
     time.sleep(0.3)
 
-    # Nút Tải xuống màu xanh
-    if not _try_click(driver, DOWNLOAD_BLUE, timeout=8):
-        # Fallback: tìm text trong #popupexecution
-        try:
-            driver.execute_script("""
+    # Click the "Tải xuống mẫu in" button
+    if not _try_click_xpath(driver, XPATH_DOWNLOAD_BLUE, timeout=8):
+        if not _try_click(driver, DOWNLOAD_BLUE, timeout=8):
+            # Fallback: find by inner text within #popupexecution
+            try:
+                driver.execute_script(
+                    """
 const root=document.querySelector('#popupexecution'); if(!root) return;
 function vis(el){if(!el)return false; const s=getComputedStyle(el);
   if(s.display==='none'||s.visibility==='hidden') return false;
@@ -212,12 +274,13 @@ const wants=['Tải xuống','Tải về','Download'];
 const all=root.querySelectorAll('*');
 for(const el of all){ if(!vis(el)) continue; const t=(el.innerText||'').trim(); if(!t) continue;
   for(const w of wants){ if(t.includes(w)){ try{ el.scrollIntoView({block:'center'}); el.click(); return; }catch(e){} } } }
-""")
-        except Exception:
-            pass
+"""
+                )
+            except Exception:
+                pass
 
+    # Wait for .docx file to appear in the downloads directory
     return _wait_for_docx(download_dir, timeout=120)
-
 
 # ===================== MAIN =====================
 
@@ -242,14 +305,20 @@ def run_automation(
     try:
         # 1) Login
         driver.get("https://amisapp.misa.vn/")
-        user_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#box-login-right .login-form-inputs .username-wrap input")))
+        user_el = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "#box-login-right .login-form-inputs .username-wrap input")
+            )
+        )
         user_el.send_keys(username)
-        driver.find_element(By.CSS_SELECTOR, "#box-login-right .login-form-inputs .pass-wrap input").send_keys(password)
+        driver.find_element(By.CSS_SELECTOR, "#box-login-right .login-form-inputs .pass-wrap input").send_keys(
+            password
+        )
         driver.find_element(By.CSS_SELECTOR, "#box-login-right .login-form-btn-container button").click()
         wait.until(EC.url_contains("amisapp.misa.vn"))
         time.sleep(0.6)
 
-        # Đóng vài popup nhẹ (best-effort)
+        # Dismiss some optional pop-ups (best effort)
         for by, sel in [
             (By.XPATH, "//button[contains(.,'Bỏ qua')]"),
             (By.XPATH, "//button[contains(.,'Tiếp tục làm việc')]"),
@@ -257,39 +326,42 @@ def run_automation(
             (By.CSS_SELECTOR, "[aria-label='Close'],[data-dismiss],.close"),
         ]:
             try:
-                driver.find_element(by, sel).click(); time.sleep(0.1)
+                driver.find_element(by, sel).click()
+                time.sleep(0.1)
             except Exception:
                 pass
 
-        # 2) Vào thẳng trang chi tiết
+        # 2) Navigate directly to the detail page
         detail_url = (
             "https://amisapp.misa.vn/process/execute/1"
             f"?ID={execution_id}&type=1&status={status}&appCode=AMISProcess&companyCode={company_code}"
         )
         driver.get(detail_url)
         try:
-            WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav")))
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#top_nav"))
+            )
         except Exception:
             pass
         time.sleep(0.4)
 
-        # 3) Mở In mẫu thiết lập
+        # 3) Open print preview via the popover
         _open_print_preview_via_popover(driver, download_dir)
 
-        # 4) Tick mẫu 3 & Tải xuống
+        # 4) Tick the third template and download the docx
         template_path = _choose_template_and_download(driver, download_dir)
 
-        # 5) Ảnh minh hoạ (best-effort)
+        # 5) Download associated images (best effort)
         images = _download_images_from_detail(driver, download_dir)
 
         return template_path, images
     finally:
         driver.quit()
 
-
 # ===================== Helpers =====================
 
 def _wait_for_docx(folder: str, timeout: int = 120) -> str:
+    """Wait for a .docx file to appear in the given folder within a timeout."""
     for _ in range(timeout):
         for f in os.listdir(folder):
             if f.lower().endswith(".docx"):
@@ -298,6 +370,10 @@ def _wait_for_docx(folder: str, timeout: int = 120) -> str:
     raise FileNotFoundError("Không thấy file .docx sau khi tải")
 
 def _download_images_from_detail(driver, download_dir: str) -> List[str]:
+    """Download up to 8 images from the detail page.
+
+    Returns a list of file paths to the downloaded images. If an image cannot be downloaded, it's skipped.
+    """
     images: List[str] = []
     for i, t in enumerate(driver.find_elements(By.CSS_SELECTOR, "img")[:8], start=1):
         try:
@@ -305,19 +381,24 @@ def _download_images_from_detail(driver, download_dir: str) -> List[str]:
             if src and src.startswith("http"):
                 r = requests.get(src, timeout=15)
                 cd = r.headers.get("Content-Disposition", "")
-                m = re.search(r'filename=\"?([^\"]+)\"?', cd) if cd else None
+                m = re.search(r'filename="?([^\"]+)"?', cd) if cd else None
                 name = m.group(1) if m else f"image_{i}.jpg"
                 p = os.path.join(download_dir, name)
-                with open(p, "wb") as f: f.write(r.content)
+                with open(p, "wb") as f:
+                    f.write(r.content)
                 images.append(p)
         except Exception:
             pass
     return images
 
-
 # ===================== Word processing =====================
 
 def fill_document(template_path: str, images: List[str], signature_path: str, output_path: str) -> None:
+    """Fill a Word document with images and a signature.
+
+    The template document is loaded and images are inserted at predefined placeholders.
+    A signature image (if provided) is appended after the images. The final document is saved to the output path.
+    """
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template not found: {template_path}")
 
@@ -337,7 +418,8 @@ def fill_document(template_path: str, images: List[str], signature_path: str, ou
     target_table = None
     for tbl in doc.tables:
         if _table_has_phu_luc(tbl):
-            target_table = tbl; break
+            target_table = tbl
+            break
 
     if target_table:
         for row in target_table.rows:
@@ -345,8 +427,11 @@ def fill_document(template_path: str, images: List[str], signature_path: str, ou
                 label = cell.text.strip()
                 if label in slot_map and ci + 1 < len(row.cells):
                     dest = row.cells[ci + 1]
+                    # Clear existing content
                     for p in dest.paragraphs:
-                        if p.text: p.text = ""
+                        if p.text:
+                            p.text = ""
+                    # Insert images
                     for pth in slot_map[label]:
                         if os.path.exists(pth):
                             dest.paragraphs[0].add_run().add_picture(pth, width=Inches(2.2))
