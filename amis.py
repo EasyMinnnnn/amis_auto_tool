@@ -164,6 +164,22 @@ return false;
 
 # ===================== Steps: open preview via "In mẫu thiết lập" =====================
 
+# Bổ sung nhiều nhãn dự phòng vì UI có thể đổi tên/diễn đạt
+_IN_MAU_TEXTS = [
+    "In mẫu thiết lập",
+    "Xem trước mẫu in",
+    "In mẫu",
+    "Mẫu thiết lập",
+    "Mẫu in",
+    "Xem trước",
+]
+
+# Selector popover thao tác
+_POPOVER_CONTENT_CSS = (
+    "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process "
+    ".dx-popup-content"
+)
+
 def _open_print_preview_via_popover(driver, download_dir: str) -> None:
     """
     Mở menu 'In mẫu thiết lập' (popover-action-process) -> xuất hiện popup #popupexecution.
@@ -179,9 +195,9 @@ def _open_print_preview_via_popover(driver, download_dir: str) -> None:
     # 1) Mở popover thao tác (nút '⋯' / Thao tác / More)
     #    Thử nhiều selector khác nhau
     opened = False
-    for _ in range(2):
+    for _ in range(3):  # tăng số lần thử cho “dai”
         # Đã mở sẵn?
-        if driver.find_elements(By.CSS_SELECTOR, "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process .dx-popup-content"):
+        if driver.find_elements(By.CSS_SELECTOR, _POPOVER_CONTENT_CSS):
             opened = True
             break
 
@@ -196,18 +212,19 @@ def _open_print_preview_via_popover(driver, download_dir: str) -> None:
 
     # 2) Chờ popover rồi click mục 'In mẫu thiết lập'
     try:
-        WebDriverWait(driver, 8).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR,
-                "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process .dx-popup-content"))
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, _POPOVER_CONTENT_CSS))
         )
     except Exception:
-        # Nếu chưa thấy, thử JS click theo text
-        _js_click_contains(driver, None, ["In mẫu thiết lập"])
+        # Nếu chưa thấy, thử JS click theo text (đề phòng mục tiêu ở ngoài popover)
+        _js_click_contains(driver, None, _IN_MAU_TEXTS)
 
     # CSS bạn gửi cho mục 'In mẫu thiết lập' trong popover
-    css_in_mau = ("body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process"
-                  ".dx-popover-without-title.dx-position-bottom > div > div.dx-popup-content > div > "
-                  "div:nth-child(2) > div.m-l-8.p-t-4")
+    css_in_mau = (
+        "body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process"
+        ".dx-popover-without-title.dx-position-bottom > div > div.dx-popup-content > div > "
+        "div:nth-child(2) > div.m-l-8.p-t-4"
+    )
 
     clicked = False
     try:
@@ -219,8 +236,9 @@ def _open_print_preview_via_popover(driver, download_dir: str) -> None:
         pass
 
     if not clicked:
-        if not _click_by_texts(driver, ["In mẫu thiết lập", "Xem trước mẫu in"], timeout=6):
-            if not _js_click_contains(driver, None, ["In mẫu thiết lập", "Xem trước mẫu in"]):
+        # Thử theo text với nhiều biến thể
+        if not _click_by_texts(driver, _IN_MAU_TEXTS, timeout=8):
+            if not _js_click_contains(driver, None, _IN_MAU_TEXTS):
                 _dump_debug(driver, download_dir, "cannot_open_in_mau_thiet_lap")
                 raise TimeoutException("Không mở được 'In mẫu thiết lập'.")
 
