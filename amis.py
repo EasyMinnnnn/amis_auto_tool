@@ -126,11 +126,27 @@ def _switch_into_notification_detail(driver, timeout: int = 15):
         EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#notification-detail"))
     )
 
+def _detail_ui_present_in_top_dom(driver) -> bool:
+    """
+    Trả về True nếu thấy dấu hiệu UI 'trang chi tiết' ngay ở DOM gốc (không trong iframe).
+    """
+    try:
+        driver.switch_to.default_content()
+        return bool(driver.find_elements(By.CSS_SELECTOR, "#top_nav, .wrap-icon-more.more-title-execution"))
+    except Exception:
+        return False
+
 def _try_switch_into_any_detail_like_iframe(driver) -> bool:
     """
-    Trong một số phiên bản, iframe id có thể không phải 'notification-detail'.
-    Hàm này thử duyệt tất cả iframe và chọn iframe chứa thanh top_nav của trang chi tiết.
+    Trong một số phiên bản, trang chi tiết KHÔNG nằm trong iframe.
+    1) Nếu thấy UI chi tiết ở DOM gốc -> trả về True (không chuyển vào iframe).
+    2) Nếu không thấy -> duyệt các iframe và chọn iframe chứa thanh top_nav / nút more.
     """
+    # 1) Thử ở DOM gốc
+    if _detail_ui_present_in_top_dom(driver):
+        return True
+
+    # 2) Nếu không có ở DOM gốc, duyệt các iframe
     driver.switch_to.default_content()
     frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
     for fr in frames:
@@ -174,6 +190,14 @@ MORE_BTN_STRICT = (
 )
 MORE_BTN_RELAX  = "div.d-flex.justify-flexend.wrap-icon-more.more-title-execution > button, .wrap-icon-more.more-title-execution > button"
 
+# Fallback cuối cùng theo selector rất cụ thể
+MORE_BTN_USER = (
+    "#popupexecution > div.ms-popup.flex.flex-col > div.ms-popup--content-header > div > "
+    "div:nth-child(2) > div > div > div.h-100.w-100.p-t-0.p-b-0.flex.flex-col > "
+    "div.nav.flex.items-center.offset-title-information > div.d-flex.content-user > "
+    "div.d-flex.justify-flexend.wrap-icon-more.m-t-14.more-title-execution > button > div > i"
+)
+
 IN_MAU_STRICT   = ("body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process."
                    "dx-popover-without-title.dx-position-bottom > div > div.dx-popup-content > div > div:nth-child(2)")
 IN_MAU_RELAX    = "div.dx-popover-wrapper.popover-action-process .dx-popup-content > div > div:nth-child(2)"
@@ -197,7 +221,7 @@ DOWNLOAD_BLUE   = (
 POPOVER_WRAPPER = "body div.dx-popover-wrapper.popover-action-process, body div.dx-popup-wrapper.popover-action-process"
 POPUPEXECUTION  = "#popupexecution"
 
-# ===== XPATH tuyệt đối do bạn cung cấp (vẫn giữ để ưu tiên thử trước) =====
+# ===== XPATH tuyệt đối (ưu tiên thử trước) =====
 XPATH_MORE_BTN       = "/html/body/div[1]/div[2]/div[2]/div/div[2]/div/div/div[1]/div[1]/div[2]/div[2]/button/div/i"
 XPATH_IN_MAU         = "/html/body/div[12]/div/div[2]/div/div[2]"
 XPATH_CHECKBOX_MAU3  = "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/div[1]/div[2]/div/div/div[1]/div[2]/div[3]/label/span[1]"
@@ -297,22 +321,31 @@ def _open_print_preview_via_popover(driver, download_dir: str) -> None:
         _log("Popup #popupexecution đã mở sẵn.")
         return
 
-    # (A) Click nút 3 chấm trong iframe
-    if not _try_switch_into_any_detail_like_iframe(driver):
-        # cố gắng switch chuẩn nếu iframe có id đúng
+    # (A) Chuẩn bị ngữ cảnh (iframe hoặc DOM gốc)
+    in_detail_context = _try_switch_into_any_detail_like_iframe(driver)
+    if not in_detail_context:
+        # Thử iframe chuẩn nếu có
         try:
             _switch_into_notification_detail(driver, timeout=20)
+            in_detail_context = True
+            _log("Đã switch vào iframe notification-detail.")
         except Exception:
-            _dump_debug(driver, download_dir, "cannot_find_detail_iframe")
-            raise TimeoutException("Không tìm thấy iframe trang chi tiết để bấm nút 3 chấm.")
+            # Không ép raise nữa; có thể trang chi tiết đang ở DOM gốc
+            driver.switch_to.default_content()
+            in_detail_context = _detail_ui_present_in_top_dom(driver)
+            if not in_detail_context:
+                _dump_debug(driver, download_dir, "cannot_find_detail_iframe_but_try_top_dom")
+                # Không raise tại đây; để phần click 'More' tự xử lý fallback
 
     try:
         # ưu tiên XPath
         if not _try_click_xpath(driver, XPATH_MORE_BTN, timeout=8):
             # fallback CSS
             if not (_try_click(driver, MORE_BTN_STRICT, timeout=6) or _try_click(driver, MORE_BTN_RELAX, timeout=6)):
-                _dump_debug(driver, download_dir, "cannot_click_more_any")
-                raise TimeoutException("Không click được nút 3 chấm (More).")
+                # Fallback cuối theo selector rất cụ thể
+                if not _try_click(driver, MORE_BTN_USER, timeout=4):
+                    _dump_debug(driver, download_dir, "cannot_click_more_any")
+                    raise TimeoutException("Không click được nút 3 chấm (More).")
         _log("Đã click nút 3 chấm.")
     except Exception as e:
         _dump_debug(driver, download_dir, "cannot_click_more_exception")
@@ -361,13 +394,15 @@ def _choose_template_and_download(driver, download_dir: str) -> str:
         _dump_debug(driver, download_dir, "no_popup_when_choose_template")
         raise TimeoutException("Popup 'Xem trước mẫu in' không xuất hiện.")
 
-    # Control nằm trong iframe trang chi tiết
+    # Control thường nằm trong iframe trang chi tiết, nhưng có thể ở DOM gốc
     if not _try_switch_into_any_detail_like_iframe(driver):
         try:
             _switch_into_notification_detail(driver, timeout=15)
         except Exception:
-            _dump_debug(driver, download_dir, "cannot_switch_iframe_for_popup")
-            raise TimeoutException("Không vào được iframe để thao tác popup.")
+            driver.switch_to.default_content()
+            if not _detail_ui_present_in_top_dom(driver):
+                _dump_debug(driver, download_dir, "cannot_switch_iframe_for_popup")
+                raise TimeoutException("Không vào được iframe để thao tác popup.")
 
     # Tick mẫu thứ 3
     try:
