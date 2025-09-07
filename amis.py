@@ -128,7 +128,7 @@ def _switch_into_notification_detail(driver, timeout: int = 15):
 
 def _detail_ui_present_in_top_dom(driver) -> bool:
     """
-    Trả về True nếu thấy dấu hiệu UI 'trang chi tiết' ngay ở DOM gốc (không trong iframe).
+    True nếu thấy dấu hiệu UI 'trang chi tiết' ngay ở DOM gốc (không trong iframe).
     """
     try:
         driver.switch_to.default_content()
@@ -138,15 +138,13 @@ def _detail_ui_present_in_top_dom(driver) -> bool:
 
 def _try_switch_into_any_detail_like_iframe(driver) -> bool:
     """
-    Trong một số phiên bản, trang chi tiết KHÔNG nằm trong iframe.
-    1) Nếu thấy UI chi tiết ở DOM gốc -> trả về True (không chuyển vào iframe).
-    2) Nếu không thấy -> duyệt các iframe và chọn iframe chứa thanh top_nav / nút more.
+    Có thể trang chi tiết KHÔNG nằm trong iframe.
+    1) Nếu thấy UI chi tiết ở DOM gốc -> True (không chuyển vào iframe).
+    2) Nếu không thấy -> duyệt các iframe và chọn iframe phù hợp.
     """
-    # 1) Thử ở DOM gốc
     if _detail_ui_present_in_top_dom(driver):
         return True
 
-    # 2) Nếu không có ở DOM gốc, duyệt các iframe
     driver.switch_to.default_content()
     frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
     for fr in frames:
@@ -182,20 +180,16 @@ def _wait_popupexecution_anywhere(driver, timeout: int = 20) -> bool:
 
 # ===================== Selectors =====================
 
-# CSS fallback cũ
+# CSS fallback cũ (khi DOM header giữ nguyên cấu trúc)
 MORE_BTN_STRICT = (
     "div.nav.flex.items-center.offset-title-information > "
     "div.d-flex.content-user > "
     "div.d-flex.justify-flexend.wrap-icon-more.m-t-14.more-title-execution > button > div > i"
 )
-MORE_BTN_RELAX  = "div.d-flex.justify-flexend.wrap-icon-more.more-title-execution > button, .wrap-icon-more.more-title-execution > button"
-
-# Fallback cuối cùng theo selector rất cụ thể
-MORE_BTN_USER = (
-    "#popupexecution > div.ms-popup.flex.flex-col > div.ms-popup--content-header > div > "
-    "div:nth-child(2) > div > div > div.h-100.w-100.p-t-0.p-b-0.flex.flex-col > "
-    "div.nav.flex.items-center.offset-title-information > div.d-flex.content-user > "
-    "div.d-flex.justify-flexend.wrap-icon-more.m-t-14.more-title-execution > button > div > i"
+MORE_BTN_RELAX  = (
+    "div.nav.flex.items-center.offset-title-information .wrap-icon-more.more-title-execution > button, "
+    ".wrap-icon-more.more-title-execution > button, "
+    ".wrap-icon-more > button"
 )
 
 IN_MAU_STRICT   = ("body > div.dx-overlay-wrapper.dx-popup-wrapper.dx-popover-wrapper.popover-action-process."
@@ -221,11 +215,93 @@ DOWNLOAD_BLUE   = (
 POPOVER_WRAPPER = "body div.dx-popover-wrapper.popover-action-process, body div.dx-popup-wrapper.popover-action-process"
 POPUPEXECUTION  = "#popupexecution"
 
-# ===== XPATH tuyệt đối (ưu tiên thử trước) =====
+# ===== XPATH tuyệt đối (ưu tiên thử trước nếu DOM đúng) =====
 XPATH_MORE_BTN       = "/html/body/div[1]/div[2]/div[2]/div/div[2]/div/div/div[1]/div[1]/div[2]/div[2]/button/div/i"
 XPATH_IN_MAU         = "/html/body/div[12]/div/div[2]/div/div[2]"
 XPATH_CHECKBOX_MAU3  = "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/div[1]/div[2]/div/div/div[1]/div[2]/div[3]/label/span[1]"
 XPATH_DOWNLOAD_BLUE  = "/html/body/div[1]/div[2]/div[2]/div[2]/div/div/div/div[2]/div/div/div[1]/div/div[1]/div[2]/div/div/div[1]/div[2]/div[1]/div/div[2]"
+
+# ===================== More button robust click =====================
+
+def _first_visible(driver, css_list):
+    els = []
+    for css in css_list:
+        try:
+            els.extend(driver.find_elements(By.CSS_SELECTOR, css))
+        except Exception:
+            pass
+    for el in els:
+        try:
+            if el.is_displayed():
+                return el
+        except Exception:
+            continue
+    return None
+
+def _js_center_click(driver, el):
+    driver.execute_script("""
+const el = arguments[0];
+el.scrollIntoView({block:'center', inline:'center'});
+try { el.click(); return; } catch(e) {}
+const r = el.getBoundingClientRect();
+const x = r.left + r.width/2, y = r.top + r.height/2;
+function fire(type){ const ev = new MouseEvent(type,{bubbles:true,cancelable:true,clientX:x,clientY:y}); el.dispatchEvent(ev); }
+fire('pointerdown'); fire('mousedown'); fire('mouseup'); fire('click');
+""", el)
+
+def _click_more_button_anywhere(driver, timeout: int = 8) -> bool:
+    """
+    Tìm và click nút 'More' (ba chấm) ở DOM gốc hoặc trong bất kỳ iframe nào.
+    Dò nhiều selector phổ biến; dùng JS click nếu cần.
+    """
+    CSS_CANDIDATES = [
+        # header hiện hành
+        "div.nav.flex.items-center.offset-title-information .wrap-icon-more.more-title-execution > button",
+        ".wrap-icon-more.more-title-execution > button",
+        ".wrap-icon-more > button",
+        # icon-based
+        "button i[class*='more'], button i[class*='ellipsis']",
+        "i[class*='more']",
+        # aria/tooltip
+        "button[aria-label*='Thêm' i], button[title*='Thêm' i]",
+        "button[aria-label*='More' i], button[title*='More' i]",
+    ]
+
+    end = time.time() + timeout
+    while time.time() < end:
+        # thử ở DOM gốc
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        el = _first_visible(driver, CSS_CANDIDATES)
+        if not el:
+            # duyệt qua mọi iframe
+            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+            for fr in frames:
+                try:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(fr)
+                    el = _first_visible(driver, CSS_CANDIDATES)
+                    if el:
+                        break
+                except Exception:
+                    continue
+
+        if el:
+            try:
+                _hover_then_click(driver, el)
+                return True
+            except Exception:
+                try:
+                    _js_center_click(driver, el)
+                    return True
+                except Exception:
+                    pass
+
+        time.sleep(0.2)
+
+    return False
 
 # ===================== Click “In mẫu…” ổn định theo TEXT =====================
 
@@ -242,14 +318,7 @@ def _click_in_mau_anywhere(driver, timeout: int = 12) -> bool:
             try:
                 el.click()
             except (ElementClickInterceptedException, Exception):
-                # fallback click bằng JS theo toạ độ ở giữa phần tử
-                driver.execute_script("""
-const el = arguments[0];
-const r = el.getBoundingClientRect();
-const x = r.left + r.width/2, y = r.top + r.height/2;
-const ev = (type)=>{ const e=new MouseEvent(type,{bubbles:true,cancelable:true,clientX:x,clientY:y}); el.dispatchEvent(e); };
-ev('pointerdown'); ev('mousedown'); ev('mouseup'); ev('click');
-""", el)
+                _js_center_click(driver, el)
             return True
         except Exception:
             return False
@@ -288,7 +357,6 @@ ev('pointerdown'); ev('mousedown'); ev('mouseup'); ev('click');
                     continue
 
         # Nếu wrapper không có text (một số case), thử tìm theo role/button
-        # và so sánh text gần kề
         try:
             buttons = driver.find_elements(By.CSS_SELECTOR, "div[role='button'], .dx-item, .dx-button, .dx-menu-item")
             for el in buttons:
@@ -312,7 +380,7 @@ ev('pointerdown'); ev('mousedown'); ev('mouseup'); ev('click');
 
 def _open_print_preview_via_popover(driver, download_dir: str) -> None:
     """
-    - Click nút More TRONG iframe (ưu tiên XPath bạn đưa; fallback CSS)
+    - Click nút More TRONG iframe (nếu có) hoặc DOM gốc
     - Quay về default_content; click item “In mẫu…” bằng TEXT (ổn định)
     - Đợi #popupexecution xuất hiện ở top hoặc trong iframe
     """
@@ -324,26 +392,23 @@ def _open_print_preview_via_popover(driver, download_dir: str) -> None:
     # (A) Chuẩn bị ngữ cảnh (iframe hoặc DOM gốc)
     in_detail_context = _try_switch_into_any_detail_like_iframe(driver)
     if not in_detail_context:
-        # Thử iframe chuẩn nếu có
         try:
             _switch_into_notification_detail(driver, timeout=20)
             in_detail_context = True
             _log("Đã switch vào iframe notification-detail.")
         except Exception:
-            # Không ép raise nữa; có thể trang chi tiết đang ở DOM gốc
             driver.switch_to.default_content()
             in_detail_context = _detail_ui_present_in_top_dom(driver)
             if not in_detail_context:
                 _dump_debug(driver, download_dir, "cannot_find_detail_iframe_but_try_top_dom")
                 # Không raise tại đây; để phần click 'More' tự xử lý fallback
 
+    # (A2) Click nút 3 chấm
     try:
-        # ưu tiên XPath
-        if not _try_click_xpath(driver, XPATH_MORE_BTN, timeout=8):
-            # fallback CSS
-            if not (_try_click(driver, MORE_BTN_STRICT, timeout=6) or _try_click(driver, MORE_BTN_RELAX, timeout=6)):
-                # Fallback cuối theo selector rất cụ thể
-                if not _try_click(driver, MORE_BTN_USER, timeout=4):
+        # Thử theo thứ tự: XPath -> CSS cũ -> dò đa selector (DOM gốc + iframe)
+        if not _try_click_xpath(driver, XPATH_MORE_BTN, timeout=6):
+            if not (_try_click(driver, MORE_BTN_STRICT, timeout=5) or _try_click(driver, MORE_BTN_RELAX, timeout=5)):
+                if not _click_more_button_anywhere(driver, timeout=8):
                     _dump_debug(driver, download_dir, "cannot_click_more_any")
                     raise TimeoutException("Không click được nút 3 chấm (More).")
         _log("Đã click nút 3 chấm.")
